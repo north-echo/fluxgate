@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	gh "github.com/google/go-github/v60/github"
 	"github.com/north-echo/fluxgate/internal/scanner"
@@ -17,6 +18,7 @@ type BatchOptions struct {
 	Top    int
 	List   string // path to file with owner/repo per line
 	Resume bool
+	Delay  time.Duration // delay between repos (0 = no delay)
 	DB     *store.DB
 	Opts   scanner.ScanOptions
 }
@@ -148,6 +150,14 @@ func (c *Client) BatchScan(ctx context.Context, repos []RepoInfo, opts BatchOpti
 		scanned++
 		if len(result.Findings) > 0 {
 			fmt.Printf("  Found %d issues in %d workflows\n", len(result.Findings), result.Workflows)
+		}
+
+		if opts.Delay > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(opts.Delay):
+			}
 		}
 	}
 

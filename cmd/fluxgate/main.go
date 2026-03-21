@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	ghclient "github.com/north-echo/fluxgate/internal/github"
 	"github.com/north-echo/fluxgate/internal/report"
@@ -160,6 +161,7 @@ func newBatchCmd() *cobra.Command {
 		dbPath     string
 		list       string
 		resume     bool
+		delay      time.Duration
 		reportPath string
 		token      string
 		severities string
@@ -214,6 +216,7 @@ func newBatchCmd() *cobra.Command {
 				Top:    top,
 				List:   list,
 				Resume: resume,
+				Delay:  delay,
 				DB:     db,
 				Opts:   parseScanOpts(severities, rules),
 			}
@@ -239,6 +242,7 @@ func newBatchCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&token, "token", "t", "", "GitHub token (default: $GITHUB_TOKEN)")
 	cmd.Flags().StringVar(&severities, "severity", "", "Filter by severity (comma-separated)")
 	cmd.Flags().StringVar(&rules, "rules", "", "Filter by rule ID (comma-separated)")
+	cmd.Flags().DurationVar(&delay, "delay", 0, "Delay between repos to avoid rate limits (e.g. 1s, 500ms)")
 
 	return cmd
 }
