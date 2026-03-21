@@ -29,8 +29,55 @@ var RuleDescriptions = map[string]string{
 	"FG-005": "Secrets in Logs",
 }
 
+// ExecutionAnalysis captures the result of post-checkout step analysis.
+type ExecutionAnalysis struct {
+	Confirmed bool
+	Likely    bool
+	Detail    string
+}
+
+// Build tools that definitely execute code from the working directory.
+var confirmedBuildCommands = []string{
+	"npm install", "npm ci", "npm run", "npm test", "npm start",
+	"yarn install", "yarn run", "yarn test", "yarn build",
+	"pnpm install", "pnpm run", "pnpm test",
+	"pip install", "poetry install",
+	"bundle install", "bundle exec",
+	"cargo build", "cargo test", "cargo run",
+	"go build", "go test", "go run",
+	"make", "cmake",
+	"mvn", "gradle", "ant",
+	"dotnet build", "dotnet test", "dotnet run",
+	"docker build",
+}
+
+// Tools that load and execute config files from the repo.
+var configLoadingTools = []string{
+	"eslint", "prettier", "jest", "vitest",
+	"webpack", "rollup", "vite", "next", "nuxt",
+	"pytest", "tox", "nox",
+	"tsup", "esbuild",
+}
+
+// Actions known to execute code from the working directory.
+var buildActions = []string{
+	"docker/build-push-action",
+	"gradle/gradle-build-action",
+	"borales/actions-yarn",
+	"bahmutov/npm-install",
+}
+
+// Read-only commands that don't execute checked-out code.
+var readOnlyCommands = []string{
+	"diff", "cmp", "cat", "grep", "head", "tail", "wc",
+	"sha256sum", "md5sum", "jq", "yq",
+	"gh pr comment", "gh pr review", "gh issue comment",
+	"test -f", "[ -f", "stat", "file", "ls",
+	"echo", "printf",
+}
+
 // CheckPwnRequest detects pull_request_target workflows that checkout PR head
-// code and have elevated permissions or secret access (FG-001).
+// code with post-checkout execution analysis (FG-001).
 func CheckPwnRequest(wf *Workflow) []Finding {
 	if !wf.On.PullRequestTarget {
 		return nil
@@ -38,30 +85,220 @@ func CheckPwnRequest(wf *Workflow) []Finding {
 
 	var findings []Finding
 	for _, job := range wf.Jobs {
-		for _, step := range job.Steps {
-			if !isCheckoutAction(step.Uses) {
-				continue
+		checkoutIdx := -1
+		checkoutLine := 0
+		checkoutRef := ""
+
+		for i, step := range job.Steps {
+			if isCheckoutAction(step.Uses) && refPointsToPRHead(step.With["ref"]) {
+				checkoutIdx = i
+				checkoutLine = step.Line
+				checkoutRef = step.With["ref"]
+				break
 			}
-			ref := step.With["ref"]
-			if !refPointsToPRHead(ref) {
-				continue
+		}
+
+		if checkoutIdx == -1 {
+			continue
+		}
+
+		// Analyze all steps after the checkout
+		postCheckoutSteps := job.Steps[checkoutIdx+1:]
+		execResult := analyzePostCheckoutExecution(postCheckoutSteps)
+
+		severity := SeverityHigh
+		confidence := ConfidencePatternOnly
+
+		if execResult.Confirmed {
+			severity = SeverityCritical
+			confidence = ConfidenceConfirmed
+		} else if execResult.Likely {
+			severity = SeverityCritical
+			confidence = ConfidenceLikely
+		}
+
+		msg := fmt.Sprintf("Pwn Request: pull_request_target with fork checkout [%s]", confidence)
+		if execResult.Detail != "" {
+			msg += " — " + execResult.Detail
+		}
+
+		permDesc := describePermissions(wf.Permissions, job.Permissions)
+		details := fmt.Sprintf(
+			"Trigger: pull_request_target, Checkout ref: %s, Permissions: %s, Execution: %s",
+			checkoutRef, permDesc, confidence,
+		)
+
+		findings = append(findings, Finding{
+			RuleID:     "FG-001",
+			Severity:   severity,
+			Confidence: confidence,
+			File:       wf.Path,
+			Line:       checkoutLine,
+			Message:    msg,
+			Details:    details,
+		})
+	}
+	return findings
+}
+
+// analyzePostCheckoutExecution checks whether steps after a fork checkout
+// execute code from the working directory.
+func analyzePostCheckoutExecution(steps []Step) ExecutionAnalysis {
+	hasSetupAction := false
+
+	for _, step := range steps {
+		// Check uses: for known build actions
+		if step.Uses != "" {
+			actionName := step.Uses
+			if idx := strings.Index(actionName, "@"); idx != -1 {
+				actionName = actionName[:idx]
 			}
-			if HasElevatedPermissions(wf.Permissions, job.Permissions) || AccessesSecrets(job) {
-				findings = append(findings, Finding{
-					RuleID:   "FG-001",
-					Severity: SeverityCritical,
-					File:     wf.Path,
-					Line:     step.Line,
-					Message:  "Pwn Request: pull_request_target with fork checkout and secret access",
-					Details: fmt.Sprintf(
-						"Trigger: pull_request_target, Checkout ref: %s, Permissions: %s",
-						ref, describePermissions(wf.Permissions, job.Permissions),
-					),
-				})
+
+			for _, ba := range buildActions {
+				if actionName == ba {
+					return ExecutionAnalysis{
+						Confirmed: true,
+						Detail:    fmt.Sprintf("action '%s' executes repo code (line %d)", actionName, step.Line),
+					}
+				}
+			}
+
+			if strings.HasPrefix(actionName, "actions/setup-") {
+				hasSetupAction = true
+			}
+		}
+
+		// Check run: blocks
+		if step.Run != "" {
+			if cmd, found := matchesBuildCommand(step.Run); found {
+				return ExecutionAnalysis{
+					Confirmed: true,
+					Detail:    fmt.Sprintf("run block executes '%s' on checked-out code (line %d)", cmd, step.Line),
+				}
+			}
+			if cmd, found := matchesConfigLoadingTool(step.Run); found {
+				return ExecutionAnalysis{
+					Likely: true,
+					Detail: fmt.Sprintf("run block invokes '%s' which loads config from repo (line %d)", cmd, step.Line),
+				}
+			}
+			// If there's a setup action and a run block, it likely executes repo code
+			if hasSetupAction && !isReadOnlyRun(step.Run) {
+				return ExecutionAnalysis{
+					Likely: true,
+					Detail: fmt.Sprintf("run block after setup action may execute repo code (line %d)", step.Line),
+				}
 			}
 		}
 	}
-	return findings
+
+	return ExecutionAnalysis{
+		Confirmed: false,
+		Likely:    false,
+		Detail:    "no code execution detected in post-checkout steps",
+	}
+}
+
+// splitShellCommands splits a shell line on &&, ||, ;, and |.
+func splitShellCommands(line string) []string {
+	var segments []string
+	current := ""
+	i := 0
+	for i < len(line) {
+		if i+1 < len(line) && (line[i:i+2] == "&&" || line[i:i+2] == "||") {
+			segments = append(segments, current)
+			current = ""
+			i += 2
+			continue
+		}
+		if line[i] == ';' || line[i] == '|' {
+			segments = append(segments, current)
+			current = ""
+			i++
+			continue
+		}
+		current += string(line[i])
+		i++
+	}
+	if current != "" {
+		segments = append(segments, current)
+	}
+	return segments
+}
+
+// matchesBuildCommand checks if a run block contains a known build command.
+func matchesBuildCommand(run string) (string, bool) {
+	lines := strings.Split(run, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		segments := splitShellCommands(line)
+		for _, seg := range segments {
+			seg = strings.TrimSpace(seg)
+			for _, cmd := range confirmedBuildCommands {
+				if strings.HasPrefix(seg, cmd+" ") || seg == cmd {
+					return cmd, true
+				}
+			}
+			// Check for relative path execution
+			if strings.HasPrefix(seg, "./") {
+				return seg, true
+			}
+		}
+	}
+	return "", false
+}
+
+// matchesConfigLoadingTool checks if a run block invokes a config-loading tool.
+func matchesConfigLoadingTool(run string) (string, bool) {
+	lines := strings.Split(run, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		segments := splitShellCommands(line)
+		for _, seg := range segments {
+			seg = strings.TrimSpace(seg)
+			for _, tool := range configLoadingTools {
+				if strings.HasPrefix(seg, tool+" ") || seg == tool {
+					return tool, true
+				}
+			}
+		}
+	}
+	return "", false
+}
+
+// isReadOnlyRun checks if a run block only contains read-only commands.
+func isReadOnlyRun(run string) bool {
+	lines := strings.Split(run, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		segments := splitShellCommands(line)
+		for _, seg := range segments {
+			seg = strings.TrimSpace(seg)
+			if seg == "" {
+				continue
+			}
+			isReadOnly := false
+			for _, ro := range readOnlyCommands {
+				if strings.HasPrefix(seg, ro+" ") || seg == ro {
+					isReadOnly = true
+					break
+				}
+			}
+			if !isReadOnly {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // CheckScriptInjection detects attacker-controllable expressions used in

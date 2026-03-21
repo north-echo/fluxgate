@@ -26,7 +26,7 @@ func loadFixture(t *testing.T, name string) *Workflow {
 	return wf
 }
 
-func TestCheckPwnRequest(t *testing.T) {
+func TestCheckPwnRequest_Confirmed(t *testing.T) {
 	wf := loadFixture(t, "pwn-request.yaml")
 	findings := CheckPwnRequest(wf)
 
@@ -39,6 +39,73 @@ func TestCheckPwnRequest(t *testing.T) {
 	}
 	if f.Severity != SeverityCritical {
 		t.Errorf("expected critical severity, got %s", f.Severity)
+	}
+	if f.Confidence != ConfidenceConfirmed {
+		t.Errorf("expected confirmed confidence, got %s", f.Confidence)
+	}
+}
+
+func TestCheckPwnRequest_NpmInstall(t *testing.T) {
+	wf := loadFixture(t, "pwn-request-npm-install.yaml")
+	findings := CheckPwnRequest(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(findings))
+	}
+	f := findings[0]
+	if f.Severity != SeverityCritical {
+		t.Errorf("expected critical severity, got %s", f.Severity)
+	}
+	if f.Confidence != ConfidenceConfirmed {
+		t.Errorf("expected confirmed confidence, got %s", f.Confidence)
+	}
+}
+
+func TestCheckPwnRequest_ConfigTool(t *testing.T) {
+	wf := loadFixture(t, "pwn-request-config-tool.yaml")
+	findings := CheckPwnRequest(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(findings))
+	}
+	f := findings[0]
+	if f.Severity != SeverityCritical {
+		t.Errorf("expected critical severity, got %s", f.Severity)
+	}
+	if f.Confidence != ConfidenceLikely {
+		t.Errorf("expected likely confidence, got %s", f.Confidence)
+	}
+}
+
+func TestCheckPwnRequest_NoExec(t *testing.T) {
+	wf := loadFixture(t, "pwn-request-no-exec.yaml")
+	findings := CheckPwnRequest(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(findings))
+	}
+	f := findings[0]
+	if f.Severity != SeverityHigh {
+		t.Errorf("expected high severity for pattern-only, got %s", f.Severity)
+	}
+	if f.Confidence != ConfidencePatternOnly {
+		t.Errorf("expected pattern-only confidence, got %s", f.Confidence)
+	}
+}
+
+func TestCheckPwnRequest_WriteAll(t *testing.T) {
+	wf := loadFixture(t, "pwn-request-write-all.yaml")
+	findings := CheckPwnRequest(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(findings))
+	}
+	f := findings[0]
+	if f.Severity != SeverityHigh {
+		t.Errorf("expected high severity for pattern-only, got %s", f.Severity)
+	}
+	if f.Confidence != ConfidencePatternOnly {
+		t.Errorf("expected pattern-only confidence, got %s", f.Confidence)
 	}
 }
 

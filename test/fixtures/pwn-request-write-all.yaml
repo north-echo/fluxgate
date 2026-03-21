@@ -1,0 +1,14 @@
+name: Check PR
+on:
+  pull_request_target:
+    types: [opened, synchronize]
+# No permissions block — defaults to write-all
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Verify file exists
+        run: test -f README.md
