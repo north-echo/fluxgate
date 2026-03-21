@@ -57,8 +57,7 @@ See [DISCLOSURE.md](DISCLOSURE.md) for our responsible disclosure protocol.
 ## VibeShield Integration
 
 Fluxgate rules map to [VibeShield](https://github.com/north-echo/vibeshield)
-V-ID taxonomy entries. See the case study:
-[V-SC-2026-001: Trivy Supply Chain Compromise](https://github.com/north-echo/vibeshield/blob/main/case-studies/V-SC-2026-001-trivy-supply-chain.md).
+V-ID taxonomy entries.
 
 ## License
 
