@@ -1,0 +1,9 @@
+name: CI
+on: [push]
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aquasecurity/trivy-action@v0.35.0
+      - uses: returntocorp/semgrep-action@713efdd345a63f0fedacfe28a21c1a6d3bef4004

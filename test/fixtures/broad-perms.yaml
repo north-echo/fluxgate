@@ -1,0 +1,10 @@
+name: Auto Label
+on:
+  pull_request_target:
+    types: [opened]
+permissions: write-all
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/labeler@v4

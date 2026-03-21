@@ -1,0 +1,20 @@
+# Binary
+fluxgate
+dist/
+
+# SQLite databases
+*.db
+*.db-wal
+*.db-shm
+
+# Editor/OS
+.DS_Store
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Test artifacts
+test-report.md
+test-repos.txt
