@@ -1,0 +1,13 @@
+name: Bot Only
+on:
+  pull_request_target:
+    paths: ['**/yarn.lock']
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    if: github.actor == 'renovate[bot]'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+      - run: node ./scripts/generate-changesets.js

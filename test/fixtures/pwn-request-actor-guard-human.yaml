@@ -1,0 +1,13 @@
+name: Allowed User
+on:
+  pull_request_target:
+    types: [opened, synchronize]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    if: contains(fromJSON('["alice","bob"]'), github.actor)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - run: make build

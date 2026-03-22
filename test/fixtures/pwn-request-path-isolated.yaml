@@ -1,0 +1,15 @@
+name: L10n Preview
+on: pull_request_target
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: merged
+      - run: |
+          rm -rf l10n
+          cp -r merged/l10n ./
+      - run: bin/build-preview
