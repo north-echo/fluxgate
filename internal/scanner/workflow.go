@@ -43,7 +43,8 @@ type Job struct {
 	Environment string // environment protection name, if set
 	Permissions PermissionsConfig
 	Steps       []Step
-	Secrets     string // "inherit" or empty
+	Secrets     string   // "inherit" or empty
+	Needs       []string // job IDs this job depends on
 }
 
 // Step represents a single step in a job.
@@ -72,6 +73,7 @@ type rawJob struct {
 	Permissions yaml.Node         `yaml:"permissions"`
 	Steps       []rawStep         `yaml:"steps"`
 	Secrets     string            `yaml:"secrets"`
+	Needs       yaml.Node         `yaml:"needs"`
 }
 
 type rawStep struct {
@@ -125,6 +127,7 @@ func ParseWorkflow(data []byte, path string) (*Workflow, error) {
 			Environment: parseEnvironment(&rawJ.Environment),
 			Permissions: parsePermissions(&rawJ.Permissions),
 			Secrets:     rawJ.Secrets,
+			Needs:       parseNeeds(&rawJ.Needs),
 		}
 		for i, rawS := range rawJ.Steps {
 			step := Step{
@@ -292,6 +295,27 @@ func parseEnvironment(node *yaml.Node) string {
 		}
 	}
 	return ""
+}
+
+// parseNeeds extracts job dependency names from the needs: field.
+// Handles both string ("needs: job1") and list ("needs: [job1, job2]") forms.
+func parseNeeds(node *yaml.Node) []string {
+	if node == nil || node.Kind == 0 {
+		return nil
+	}
+	switch node.Kind {
+	case yaml.ScalarNode:
+		if node.Value != "" {
+			return []string{node.Value}
+		}
+	case yaml.SequenceNode:
+		var needs []string
+		for _, n := range node.Content {
+			needs = append(needs, n.Value)
+		}
+		return needs
+	}
+	return nil
 }
 
 // HasElevatedPermissions checks if the workflow/job has write permissions.

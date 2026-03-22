@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -342,6 +343,119 @@ func TestCheckTokenExposure_SafeWorkflow(t *testing.T) {
 
 	if len(findings) != 0 {
 		t.Fatalf("expected 0 findings for safe workflow, got %d", len(findings))
+	}
+}
+
+// --- Gap 1: Actor guard tests ---
+
+func TestCheckPwnRequest_ActorGuardBot(t *testing.T) {
+	wf := loadFixture(t, "pwn-request-actor-guard-bot.yaml")
+	findings := CheckPwnRequest(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(findings))
+	}
+	f := findings[0]
+	if f.Severity != SeverityInfo {
+		t.Errorf("expected info severity for bot actor guard, got %s", f.Severity)
+	}
+	if len(f.Mitigations) == 0 {
+		t.Error("expected mitigations to be populated")
+	}
+}
+
+func TestCheckPwnRequest_ActorGuardHuman(t *testing.T) {
+	wf := loadFixture(t, "pwn-request-actor-guard-human.yaml")
+	findings := CheckPwnRequest(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(findings))
+	}
+	f := findings[0]
+	if f.Severity != SeverityHigh {
+		t.Errorf("expected high severity (downgraded from critical by 1 for human actor guard), got %s", f.Severity)
+	}
+}
+
+// --- Gap 2: Action permission gate tests ---
+
+func TestCheckPwnRequest_ActionPermGate(t *testing.T) {
+	wf := loadFixture(t, "pwn-request-action-perm-gate.yaml")
+	findings := CheckPwnRequest(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(findings))
+	}
+	f := findings[0]
+	if f.Severity != SeverityHigh {
+		t.Errorf("expected high severity (downgraded from critical by 1 for maintainer check via action), got %s", f.Severity)
+	}
+	if len(f.Mitigations) == 0 {
+		t.Error("expected mitigations to be populated")
+	}
+}
+
+// --- Gap 3: Cross-job needs gate tests ---
+
+func TestCheckPwnRequest_NeedsGate(t *testing.T) {
+	wf := loadFixture(t, "pwn-request-needs-gate.yaml")
+	findings := CheckPwnRequest(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(findings))
+	}
+	f := findings[0]
+	if f.Severity != SeverityHigh {
+		t.Errorf("expected high severity (downgraded from critical by 1 for environment gate via needs), got %s", f.Severity)
+	}
+	if len(f.Mitigations) == 0 {
+		t.Error("expected mitigations to be populated")
+	}
+	// Verify the mitigation mentions the authorize job
+	found := false
+	for _, m := range f.Mitigations {
+		if strings.Contains(m, "authorize") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected mitigations to reference 'authorize' job")
+	}
+}
+
+// --- Gap 4: Path isolation tests ---
+
+func TestCheckPwnRequest_PathIsolated(t *testing.T) {
+	wf := loadFixture(t, "pwn-request-path-isolated.yaml")
+	findings := CheckPwnRequest(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(findings))
+	}
+	f := findings[0]
+	// Path isolation downgrades confidence to pattern-only, not severity
+	if f.Confidence != ConfidencePatternOnly {
+		t.Errorf("expected pattern-only confidence for path-isolated checkout, got %s", f.Confidence)
+	}
+	if len(f.Mitigations) == 0 {
+		t.Error("expected mitigations to mention path isolation")
+	}
+}
+
+func TestCheckPwnRequest_PathExec(t *testing.T) {
+	wf := loadFixture(t, "pwn-request-path-exec.yaml")
+	findings := CheckPwnRequest(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(findings))
+	}
+	f := findings[0]
+	// Path with direct execution should still be confirmed/critical
+	if f.Severity != SeverityCritical {
+		t.Errorf("expected critical severity for path with direct execution, got %s", f.Severity)
+	}
+	if f.Confidence != ConfidenceConfirmed {
+		t.Errorf("expected confirmed confidence for path with direct execution, got %s", f.Confidence)
 	}
 }
 

@@ -46,7 +46,11 @@ type MitigationAnalysis struct {
 	EnvironmentGated bool
 	MaintainerCheck  bool
 	ForkGuard        bool
+	ActorGuard       bool // Job if: restricts execution to specific bot actor(s)
+	ActorGuardHuman  bool // Job if: restricts to specific human actor(s) (weaker)
+	NeedsGate        bool // Job depends on upstream job with environment/fork gate
 	TokenBlanked     bool
+	PathIsolated     bool // Fork code checked out to subdirectory, no direct execution
 	Details          []string
 }
 
@@ -102,12 +106,14 @@ func CheckPwnRequest(wf *Workflow) []Finding {
 		checkoutIdx := -1
 		checkoutLine := 0
 		checkoutRef := ""
+		checkoutPath := ""
 
 		for i, step := range job.Steps {
 			if isCheckoutAction(step.Uses) && refPointsToPRHead(step.With["ref"]) {
 				checkoutIdx = i
 				checkoutLine = step.Line
 				checkoutRef = step.With["ref"]
+				checkoutPath = step.With["path"]
 				break
 			}
 		}
@@ -132,18 +138,24 @@ func CheckPwnRequest(wf *Workflow) []Finding {
 		}
 
 		// Analyze mitigations and adjust severity
-		mitigation := analyzeMitigations(wf, job, checkoutIdx, postCheckoutSteps)
+		mitigation := analyzeMitigations(wf, job, checkoutIdx, postCheckoutSteps, checkoutPath)
 		mitigated := false
 
-		if mitigation.ForkGuard {
+		if mitigation.ForkGuard || mitigation.ActorGuard {
 			severity = SeverityInfo
 			confidence = ConfidencePatternOnly
 			mitigated = true
 		} else if mitigation.LabelGated && mitigation.EnvironmentGated {
 			severity = downgradeBy(severity, 2)
 			mitigated = true
-		} else if mitigation.LabelGated || mitigation.EnvironmentGated || mitigation.MaintainerCheck {
+		} else if mitigation.LabelGated || mitigation.EnvironmentGated || mitigation.MaintainerCheck || mitigation.ActorGuardHuman {
 			severity = downgradeBy(severity, 1)
+			mitigated = true
+		}
+
+		// Path isolation adjusts confidence, not severity
+		if mitigation.PathIsolated && confidence == ConfidenceConfirmed {
+			confidence = ConfidencePatternOnly
 			mitigated = true
 		}
 
@@ -629,7 +641,7 @@ func CheckTokenExposure(wf *Workflow) []Finding {
 }
 
 // analyzeMitigations detects defensive controls on a workflow/job.
-func analyzeMitigations(wf *Workflow, job Job, checkoutIdx int, postCheckoutSteps []Step) MitigationAnalysis {
+func analyzeMitigations(wf *Workflow, job Job, checkoutIdx int, postCheckoutSteps []Step, checkoutPath string) MitigationAnalysis {
 	m := MitigationAnalysis{}
 
 	// 1. Check pull_request_target types filter
@@ -638,7 +650,7 @@ func analyzeMitigations(wf *Workflow, job Job, checkoutIdx int, postCheckoutStep
 		m.Details = append(m.Details, "trigger requires 'labeled' event (maintainer action)")
 	}
 
-	// 2. Check job-level if: for label gates and fork guards
+	// 2. Check job-level if: for label gates, fork guards, and actor guards
 	if job.If != "" {
 		if containsLabelCheck(job.If) {
 			m.LabelGated = true
@@ -647,6 +659,14 @@ func analyzeMitigations(wf *Workflow, job Job, checkoutIdx int, postCheckoutStep
 		if containsForkGuard(job.If) {
 			m.ForkGuard = true
 			m.Details = append(m.Details, "job if: contains fork guard")
+		}
+		isBot, isHuman := containsActorGuard(job.If)
+		if isBot {
+			m.ActorGuard = true
+			m.Details = append(m.Details, fmt.Sprintf("job if: restricts to bot actor (%s)", truncate(job.If, 80)))
+		} else if isHuman {
+			m.ActorGuardHuman = true
+			m.Details = append(m.Details, fmt.Sprintf("job if: restricts to specific actor(s) (%s)", truncate(job.If, 80)))
 		}
 	}
 
@@ -677,6 +697,50 @@ func analyzeMitigations(wf *Workflow, job Job, checkoutIdx int, postCheckoutStep
 	}
 	if m.TokenBlanked {
 		m.Details = append(m.Details, "GITHUB_TOKEN explicitly blanked on execution steps")
+	}
+
+	// 6. Check needs: chain for upstream environment/fork gates
+	for _, depName := range job.Needs {
+		if dep, ok := wf.Jobs[depName]; ok {
+			if dep.Environment != "" {
+				m.NeedsGate = true
+				m.EnvironmentGated = true
+				m.Details = append(m.Details, fmt.Sprintf(
+					"depends on job '%s' with environment '%s' (requires approval)",
+					depName, truncate(dep.Environment, 60)))
+			}
+			if dep.If != "" && containsForkGuard(dep.If) {
+				m.NeedsGate = true
+				m.ForkGuard = true
+				m.Details = append(m.Details, fmt.Sprintf(
+					"depends on job '%s' with fork guard", depName))
+			}
+			if dep.If != "" {
+				isBot, _ := containsActorGuard(dep.If)
+				if isBot {
+					m.NeedsGate = true
+					m.ActorGuard = true
+					m.Details = append(m.Details, fmt.Sprintf(
+						"depends on job '%s' with bot actor guard", depName))
+				}
+			}
+		}
+	}
+
+	// 7. Check path isolation — fork code in subdirectory with no direct execution
+	if checkoutPath != "" {
+		hasForkExec := false
+		for _, step := range postCheckoutSteps {
+			if step.Run != "" && referencesForkPath(step.Run, checkoutPath) {
+				hasForkExec = true
+				break
+			}
+		}
+		if !hasForkExec {
+			m.PathIsolated = true
+			m.Details = append(m.Details, fmt.Sprintf(
+				"fork code checked out to '%s/' — no direct execution of fork path detected", checkoutPath))
+		}
 	}
 
 	return m
@@ -748,8 +812,59 @@ func containsForkGuard(ifExpr string) bool {
 	return false
 }
 
+// containsActorGuard detects actor-based gating in if: conditionals.
+// Returns (isBot, isHuman): bot guards are strong (info), human guards are weaker (downgrade by 1).
+func containsActorGuard(ifExpr string) (isBot bool, isHuman bool) {
+	lower := strings.ToLower(ifExpr)
+	actorPrefixes := []string{
+		"github.actor ==",
+		"github.triggering_actor ==",
+	}
+	hasActorCheck := false
+	for _, p := range actorPrefixes {
+		if strings.Contains(lower, p) {
+			hasActorCheck = true
+			break
+		}
+	}
+	if !hasActorCheck {
+		// Also detect contains(fromJSON(...), github.actor) pattern
+		if strings.Contains(lower, "github.actor") && strings.Contains(lower, "contains(") {
+			hasActorCheck = true
+		}
+	}
+	if !hasActorCheck {
+		return false, false
+	}
+	// Bot accounts have [bot] suffix
+	if strings.Contains(lower, "[bot]") {
+		return true, false
+	}
+	return false, true
+}
+
 // containsMaintainerCheck detects permission verification steps.
 func containsMaintainerCheck(step Step) bool {
+	// 1. Check for known permission-checking actions
+	permissionActions := []string{
+		"actions-cool/check-user-permission",
+		"prince-chrismc/check-actor-permissions-action",
+		"lannonbr/repo-permission-check-action",
+		"themoddinginquisition/actions-team-membership",
+	}
+	if step.Uses != "" {
+		actionName := step.Uses
+		if idx := strings.Index(actionName, "@"); idx != -1 {
+			actionName = actionName[:idx]
+		}
+		for _, action := range permissionActions {
+			if strings.EqualFold(actionName, action) {
+				return true
+			}
+		}
+	}
+
+	// 2. Check script content for API calls
 	checkPatterns := []string{
 		"getCollaboratorPermissionLevel",
 		"repos.getCollaboratorPermission",
@@ -763,6 +878,47 @@ func containsMaintainerCheck(step Step) bool {
 	}
 	for _, p := range checkPatterns {
 		if strings.Contains(searchText, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// referencesForkPath checks if a run block executes code from the fork checkout path.
+func referencesForkPath(run string, checkoutPath string) bool {
+	execPatterns := []string{
+		"cd " + checkoutPath,
+		"./" + checkoutPath + "/",
+		checkoutPath + "/",
+		"pip install " + checkoutPath,
+		"pip install -e " + checkoutPath,
+		"npm install --prefix " + checkoutPath,
+	}
+	for _, p := range execPatterns {
+		if strings.Contains(run, p) {
+			// Distinguish data-only operations from execution
+			// cp, mv, rsync are data operations, not execution
+			lines := strings.Split(run, "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if strings.Contains(line, checkoutPath) {
+					if isDataOnlyCommand(line) {
+						continue
+					}
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// isDataOnlyCommand checks if a shell line is a data-copy operation (not execution).
+func isDataOnlyCommand(line string) bool {
+	dataOps := []string{"cp ", "cp -r ", "mv ", "rsync ", "rm ", "rm -rf ", "ln ", "mkdir "}
+	trimmed := strings.TrimSpace(line)
+	for _, op := range dataOps {
+		if strings.HasPrefix(trimmed, op) {
 			return true
 		}
 	}

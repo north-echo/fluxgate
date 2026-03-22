@@ -1,0 +1,19 @@
+name: Gated Build
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+jobs:
+  authorize:
+    environment:
+      ${{ github.event.pull_request.head.repo.full_name == github.repository && 'internal' || 'external' }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "approved"
+  build:
+    needs: authorize
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - run: make build
