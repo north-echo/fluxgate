@@ -1,0 +1,20 @@
+name: Format Check
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+  issues: write
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.ref }}
+          persist-credentials: false
+      - run: pip install -e ".[dev]"
+      - run: pyink --check .
+        env:
+          GITHUB_TOKEN: ""

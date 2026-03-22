@@ -159,8 +159,12 @@ jobs:
 		t.Fatalf("ScanRemote failed: %v", err)
 	}
 
-	if len(result.Findings) != 0 {
-		t.Errorf("expected 0 findings for safe workflow, got %d", len(result.Findings))
+	// The safe workflow uses pull_request + go test, which triggers FG-006.
+	// Verify no FG-001 findings (the primary "unsafe" signal).
+	for _, f := range result.Findings {
+		if f.RuleID == "FG-001" {
+			t.Errorf("expected no FG-001 findings for safe workflow, got: %s", f.Message)
+		}
 	}
 }
 

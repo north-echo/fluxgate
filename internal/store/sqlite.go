@@ -57,7 +57,16 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("running migrations: %w", err)
 	}
 
+	// Run incremental migrations (idempotent)
+	runMigrations(db)
+
 	return &DB{db: db}, nil
+}
+
+// runMigrations applies incremental schema changes. Each is idempotent.
+func runMigrations(db *sqlx.DB) {
+	// Add source column if it doesn't exist
+	db.Exec(migration001AddSource)
 }
 
 // Close closes the database connection.
@@ -74,6 +83,11 @@ func (d *DB) IsRepoScanned(owner, name string) (bool, error) {
 
 // SaveResult stores a scan result for a repository.
 func (d *DB) SaveResult(owner, name string, stars int, language string, result *scanner.ScanResult) error {
+	return d.SaveResultWithSource(owner, name, stars, language, result, "")
+}
+
+// SaveResultWithSource stores a scan result with a source tag (e.g. "code-search", "redhat-org").
+func (d *DB) SaveResultWithSource(owner, name string, stars int, language string, result *scanner.ScanResult, source string) error {
 	tx, err := d.db.Beginx()
 	if err != nil {
 		return err
@@ -81,15 +95,16 @@ func (d *DB) SaveResult(owner, name string, stars int, language string, result *
 	defer tx.Rollback()
 
 	res, err := tx.Exec(
-		`INSERT INTO repos (owner, name, stars, language, workflows_count, findings_count)
-		 VALUES (?, ?, ?, ?, ?, ?)
+		`INSERT INTO repos (owner, name, stars, language, workflows_count, findings_count, source)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(owner, name) DO UPDATE SET
 		   stars = excluded.stars,
 		   language = excluded.language,
 		   scanned_at = CURRENT_TIMESTAMP,
 		   workflows_count = excluded.workflows_count,
-		   findings_count = excluded.findings_count`,
-		owner, name, stars, language, result.Workflows, len(result.Findings),
+		   findings_count = excluded.findings_count,
+		   source = COALESCE(NULLIF(excluded.source, ''), repos.source)`,
+		owner, name, stars, language, result.Workflows, len(result.Findings), source,
 	)
 	if err != nil {
 		return fmt.Errorf("inserting repo: %w", err)

@@ -202,8 +202,13 @@ func TestSafeWorkflow_NoFindings(t *testing.T) {
 	opts := ScanOptions{}
 	findings := ScanWorkflow(wf, opts)
 
-	if len(findings) != 0 {
-		t.Fatalf("expected 0 findings for safe workflow, got %d:", len(findings))
+	// The safe workflow uses pull_request + go test, which triggers FG-006
+	// (fork PR code execution). This is by design — FG-006 flags all
+	// pull_request workflows that execute build commands on fork code.
+	for _, f := range findings {
+		if f.RuleID != "FG-006" {
+			t.Errorf("expected only FG-006 findings for safe workflow, got %s: %s", f.RuleID, f.Message)
+		}
 	}
 }
 
@@ -228,6 +233,119 @@ func TestMixedWorkflow_MultipleFindings(t *testing.T) {
 		}
 	}
 }
+
+// --- FG-001 mitigation tests ---
+
+func TestCheckPwnRequest_LabelGated(t *testing.T) {
+	wf := loadFixture(t, "pwn-request-label-gated.yaml")
+	findings := CheckPwnRequest(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(findings))
+	}
+	f := findings[0]
+	if f.Severity != SeverityMedium {
+		t.Errorf("expected medium severity (downgraded from critical by 2: label+env), got %s", f.Severity)
+	}
+	if len(f.Mitigations) == 0 {
+		t.Error("expected mitigations to be populated")
+	}
+}
+
+func TestCheckPwnRequest_ForkGuard(t *testing.T) {
+	wf := loadFixture(t, "pwn-request-fork-guard.yaml")
+	findings := CheckPwnRequest(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(findings))
+	}
+	f := findings[0]
+	if f.Severity != SeverityInfo {
+		t.Errorf("expected info severity for fork-guarded workflow, got %s", f.Severity)
+	}
+}
+
+func TestCheckPwnRequest_EnvOnly(t *testing.T) {
+	wf := loadFixture(t, "pwn-request-env-only.yaml")
+	findings := CheckPwnRequest(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(findings))
+	}
+	f := findings[0]
+	if f.Severity != SeverityHigh {
+		t.Errorf("expected high severity (downgraded from critical by 1: env only), got %s", f.Severity)
+	}
+}
+
+// --- FG-006 tests ---
+
+func TestCheckForkPRCodeExec(t *testing.T) {
+	wf := loadFixture(t, "fork-pr-code-exec.yaml")
+	findings := CheckForkPRCodeExec(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(findings))
+	}
+	f := findings[0]
+	if f.RuleID != "FG-006" {
+		t.Errorf("expected rule FG-006, got %s", f.RuleID)
+	}
+	if f.Severity != SeverityMedium {
+		t.Errorf("expected medium severity (no secrets), got %s", f.Severity)
+	}
+}
+
+func TestCheckForkPRCodeExec_WithSecrets(t *testing.T) {
+	wf := loadFixture(t, "fork-pr-code-exec-with-secrets.yaml")
+	findings := CheckForkPRCodeExec(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(findings))
+	}
+	f := findings[0]
+	if f.Severity != SeverityHigh {
+		t.Errorf("expected high severity (secrets on build step), got %s", f.Severity)
+	}
+}
+
+func TestCheckForkPRCodeExec_Safe(t *testing.T) {
+	wf := loadFixture(t, "fork-pr-safe.yaml")
+	findings := CheckForkPRCodeExec(wf)
+
+	if len(findings) != 0 {
+		t.Fatalf("expected 0 findings for fork-guarded workflow, got %d", len(findings))
+	}
+}
+
+// --- FG-007 tests ---
+
+func TestCheckTokenExposure_PartialBlank(t *testing.T) {
+	wf := loadFixture(t, "token-partial-blank.yaml")
+	findings := CheckTokenExposure(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding (pip install without blank), got %d", len(findings))
+	}
+	f := findings[0]
+	if f.RuleID != "FG-007" {
+		t.Errorf("expected rule FG-007, got %s", f.RuleID)
+	}
+	if f.Severity != SeverityLow {
+		t.Errorf("expected low severity (pull_request trigger), got %s", f.Severity)
+	}
+}
+
+func TestCheckTokenExposure_SafeWorkflow(t *testing.T) {
+	wf := loadFixture(t, "safe-workflow.yaml")
+	findings := CheckTokenExposure(wf)
+
+	if len(findings) != 0 {
+		t.Fatalf("expected 0 findings for safe workflow, got %d", len(findings))
+	}
+}
+
+// --- Filter tests ---
 
 func TestSeverityFilter(t *testing.T) {
 	wf := loadFixture(t, "mixed-workflow.yaml")

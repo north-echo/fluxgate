@@ -17,6 +17,8 @@ func AllRules() map[string]Rule {
 		"FG-003": CheckTagPinning,
 		"FG-004": CheckBroadPermissions,
 		"FG-005": CheckSecretsInLogs,
+		"FG-006": CheckForkPRCodeExec,
+		"FG-007": CheckTokenExposure,
 	}
 }
 
@@ -27,6 +29,8 @@ var RuleDescriptions = map[string]string{
 	"FG-003": "Tag-Based Pinning",
 	"FG-004": "Broad Permissions",
 	"FG-005": "Secrets in Logs",
+	"FG-006": "Fork PR Code Execution",
+	"FG-007": "Token Exposure in Build Steps",
 }
 
 // ExecutionAnalysis captures the result of post-checkout step analysis.
@@ -34,6 +38,16 @@ type ExecutionAnalysis struct {
 	Confirmed bool
 	Likely    bool
 	Detail    string
+}
+
+// MitigationAnalysis captures defensive controls detected on a workflow/job.
+type MitigationAnalysis struct {
+	LabelGated       bool
+	EnvironmentGated bool
+	MaintainerCheck  bool
+	ForkGuard        bool
+	TokenBlanked     bool
+	Details          []string
 }
 
 // Build tools that definitely execute code from the working directory.
@@ -117,9 +131,28 @@ func CheckPwnRequest(wf *Workflow) []Finding {
 			confidence = ConfidenceLikely
 		}
 
+		// Analyze mitigations and adjust severity
+		mitigation := analyzeMitigations(wf, job, checkoutIdx, postCheckoutSteps)
+		mitigated := false
+
+		if mitigation.ForkGuard {
+			severity = SeverityInfo
+			confidence = ConfidencePatternOnly
+			mitigated = true
+		} else if mitigation.LabelGated && mitigation.EnvironmentGated {
+			severity = downgradeBy(severity, 2)
+			mitigated = true
+		} else if mitigation.LabelGated || mitigation.EnvironmentGated || mitigation.MaintainerCheck {
+			severity = downgradeBy(severity, 1)
+			mitigated = true
+		}
+
 		msg := fmt.Sprintf("Pwn Request: pull_request_target with fork checkout [%s]", confidence)
 		if execResult.Detail != "" {
 			msg += " — " + execResult.Detail
+		}
+		if mitigated {
+			msg += " (mitigated: " + strings.Join(mitigation.Details, "; ") + ")"
 		}
 
 		permDesc := describePermissions(wf.Permissions, job.Permissions)
@@ -129,13 +162,14 @@ func CheckPwnRequest(wf *Workflow) []Finding {
 		)
 
 		findings = append(findings, Finding{
-			RuleID:     "FG-001",
-			Severity:   severity,
-			Confidence: confidence,
-			File:       wf.Path,
-			Line:       checkoutLine,
-			Message:    msg,
-			Details:    details,
+			RuleID:      "FG-001",
+			Severity:    severity,
+			Confidence:  confidence,
+			File:        wf.Path,
+			Line:        checkoutLine,
+			Message:     msg,
+			Details:     details,
+			Mitigations: mitigation.Details,
 		})
 	}
 	return findings
@@ -468,6 +502,321 @@ func CheckSecretsInLogs(wf *Workflow) []Finding {
 		}
 	}
 	return findings
+}
+
+// CheckForkPRCodeExec detects pull_request workflows that execute attacker-controlled
+// build hooks from fork code (FG-006).
+func CheckForkPRCodeExec(wf *Workflow) []Finding {
+	if !wf.On.PullRequest {
+		return nil
+	}
+
+	var findings []Finding
+	for _, job := range wf.Jobs {
+		// Skip if job has a fork guard
+		if job.If != "" && containsForkGuard(job.If) {
+			continue
+		}
+
+		checkoutIdx := -1
+		checkoutLine := 0
+
+		for i, step := range job.Steps {
+			if isCheckoutAction(step.Uses) && checkoutsForkCode(step) {
+				checkoutIdx = i
+				checkoutLine = step.Line
+				break
+			}
+		}
+
+		if checkoutIdx == -1 {
+			continue
+		}
+
+		postCheckoutSteps := job.Steps[checkoutIdx+1:]
+		execResult := analyzePostCheckoutExecution(postCheckoutSteps)
+
+		if !execResult.Confirmed && !execResult.Likely {
+			continue
+		}
+
+		severity := SeverityMedium
+		if postCheckoutAccessesSecrets(postCheckoutSteps) {
+			severity = SeverityHigh
+		}
+
+		confidence := ConfidenceConfirmed
+		if !execResult.Confirmed {
+			confidence = ConfidenceLikely
+		}
+
+		msg := fmt.Sprintf("Fork PR Code Execution: pull_request checkout runs %s", execResult.Detail)
+
+		findings = append(findings, Finding{
+			RuleID:     "FG-006",
+			Severity:   severity,
+			Confidence: confidence,
+			File:       wf.Path,
+			Line:       checkoutLine,
+			Message:    msg,
+			Details:    "Trigger: pull_request (read-only token from forks, but arbitrary code execution on runner)",
+		})
+	}
+	return findings
+}
+
+// CheckTokenExposure detects inconsistent GITHUB_TOKEN blanking where build steps
+// have token access but other steps blank it (FG-007).
+func CheckTokenExposure(wf *Workflow) []Finding {
+	if !wf.On.PullRequestTarget && !wf.On.PullRequest {
+		return nil
+	}
+
+	var findings []Finding
+	for _, job := range wf.Jobs {
+		checkoutIdx := -1
+		for i, step := range job.Steps {
+			if isCheckoutAction(step.Uses) && (refPointsToPRHead(step.With["ref"]) || checkoutsForkCode(step)) {
+				checkoutIdx = i
+				break
+			}
+		}
+		if checkoutIdx == -1 {
+			continue
+		}
+
+		postCheckoutSteps := job.Steps[checkoutIdx+1:]
+		hasAnyBlanked := false
+		var unblankedExecSteps []Step
+
+		for _, step := range postCheckoutSteps {
+			if step.Run == "" {
+				continue
+			}
+			if isTokenBlanked(step) {
+				hasAnyBlanked = true
+			} else {
+				if _, found := matchesBuildCommand(step.Run); found {
+					unblankedExecSteps = append(unblankedExecSteps, step)
+				} else if _, found := matchesConfigLoadingTool(step.Run); found {
+					unblankedExecSteps = append(unblankedExecSteps, step)
+				}
+			}
+		}
+
+		// Only flag inconsistent blanking — some steps blank, build step doesn't
+		if hasAnyBlanked && len(unblankedExecSteps) > 0 {
+			severity := SeverityLow
+			if wf.On.PullRequestTarget {
+				severity = SeverityMedium
+			}
+
+			for _, step := range unblankedExecSteps {
+				findings = append(findings, Finding{
+					RuleID:   "FG-007",
+					Severity: severity,
+					File:     wf.Path,
+					Line:     step.Line,
+					Message: fmt.Sprintf(
+						"Token Available During Code Execution: GITHUB_TOKEN not blanked on build step (line %d) despite being blanked on other steps",
+						step.Line),
+					Details: "Other steps in this job set GITHUB_TOKEN=\"\" but the step executing attacker-controlled code does not. The token is accessible to build hooks via the process environment.",
+				})
+			}
+		}
+	}
+	return findings
+}
+
+// analyzeMitigations detects defensive controls on a workflow/job.
+func analyzeMitigations(wf *Workflow, job Job, checkoutIdx int, postCheckoutSteps []Step) MitigationAnalysis {
+	m := MitigationAnalysis{}
+
+	// 1. Check pull_request_target types filter
+	if containsOnly(wf.On.PullRequestTargetTypes, "labeled") {
+		m.LabelGated = true
+		m.Details = append(m.Details, "trigger requires 'labeled' event (maintainer action)")
+	}
+
+	// 2. Check job-level if: for label gates and fork guards
+	if job.If != "" {
+		if containsLabelCheck(job.If) {
+			m.LabelGated = true
+			m.Details = append(m.Details, fmt.Sprintf("job if: contains label gate (%s)", truncate(job.If, 80)))
+		}
+		if containsForkGuard(job.If) {
+			m.ForkGuard = true
+			m.Details = append(m.Details, "job if: contains fork guard")
+		}
+	}
+
+	// 3. Check environment protection
+	if job.Environment != "" {
+		m.EnvironmentGated = true
+		m.Details = append(m.Details, fmt.Sprintf("job uses environment '%s' (may require approval)", job.Environment))
+	}
+
+	// 4. Check for maintainer permission verification in pre-checkout steps
+	if checkoutIdx > 0 {
+		preCheckoutSteps := job.Steps[:checkoutIdx]
+		for _, step := range preCheckoutSteps {
+			if containsMaintainerCheck(step) {
+				m.MaintainerCheck = true
+				m.Details = append(m.Details, fmt.Sprintf("pre-checkout step checks permissions (line %d)", step.Line))
+			}
+		}
+	}
+
+	// 5. Check if GITHUB_TOKEN is blanked on execution steps
+	for _, step := range postCheckoutSteps {
+		if step.Run != "" && !isReadOnlyRun(step.Run) {
+			if isTokenBlanked(step) {
+				m.TokenBlanked = true
+			}
+		}
+	}
+	if m.TokenBlanked {
+		m.Details = append(m.Details, "GITHUB_TOKEN explicitly blanked on execution steps")
+	}
+
+	return m
+}
+
+// downgradeBy reduces severity by N levels on the severity ladder.
+func downgradeBy(severity string, levels int) string {
+	order := []string{SeverityCritical, SeverityHigh, SeverityMedium, SeverityLow, SeverityInfo}
+	idx := 0
+	for i, s := range order {
+		if s == severity {
+			idx = i
+			break
+		}
+	}
+	idx += levels
+	if idx >= len(order) {
+		idx = len(order) - 1
+	}
+	return order[idx]
+}
+
+// containsOnly checks if a slice contains only the specified allowed values.
+func containsOnly(types []string, allowed ...string) bool {
+	if len(types) == 0 {
+		return false
+	}
+	allowSet := make(map[string]bool)
+	for _, a := range allowed {
+		allowSet[a] = true
+	}
+	for _, t := range types {
+		if !allowSet[t] {
+			return false
+		}
+	}
+	return true
+}
+
+// containsLabelCheck detects label-based gating in if: conditionals.
+func containsLabelCheck(ifExpr string) bool {
+	labelPatterns := []string{
+		"github.event.label.name",
+		"github.event.action == 'labeled'",
+		`github.event.action == "labeled"`,
+		"contains(github.event.pull_request.labels",
+	}
+	lower := strings.ToLower(ifExpr)
+	for _, p := range labelPatterns {
+		if strings.Contains(lower, strings.ToLower(p)) {
+			return true
+		}
+	}
+	return false
+}
+
+// containsForkGuard detects conditions that restrict to internal PRs only.
+func containsForkGuard(ifExpr string) bool {
+	forkGuardPatterns := []string{
+		"github.event.pull_request.head.repo.full_name == github.repository",
+		"github.event.pull_request.head.repo.fork == false",
+		"github.event.pull_request.head.repo.fork != true",
+	}
+	for _, p := range forkGuardPatterns {
+		if strings.Contains(ifExpr, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// containsMaintainerCheck detects permission verification steps.
+func containsMaintainerCheck(step Step) bool {
+	checkPatterns := []string{
+		"getCollaboratorPermissionLevel",
+		"repos.getCollaboratorPermission",
+		"permission.permission",
+	}
+	searchText := step.Run
+	if step.Uses != "" && strings.Contains(step.Uses, "actions/github-script") {
+		if script, ok := step.With["script"]; ok {
+			searchText = script
+		}
+	}
+	for _, p := range checkPatterns {
+		if strings.Contains(searchText, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// isTokenBlanked checks if a step explicitly sets GITHUB_TOKEN to empty.
+func isTokenBlanked(step Step) bool {
+	if token, ok := step.Env["GITHUB_TOKEN"]; ok {
+		return token == "" || token == "''" || token == `""`
+	}
+	return false
+}
+
+// checkoutsForkCode checks if a checkout step checks out fork code.
+// For pull_request trigger, default checkout (no ref) checks out the merge commit
+// which includes fork code.
+func checkoutsForkCode(step Step) bool {
+	ref := step.With["ref"]
+	if refPointsToPRHead(ref) {
+		return true
+	}
+	// Default checkout on pull_request includes fork code
+	if ref == "" {
+		return true
+	}
+	return false
+}
+
+// postCheckoutAccessesSecrets checks if any post-checkout step references secrets.
+func postCheckoutAccessesSecrets(steps []Step) bool {
+	for _, step := range steps {
+		if step.Run == "" {
+			continue
+		}
+		for _, v := range step.Env {
+			if strings.Contains(v, "secrets.") && !isTokenBlanked(step) {
+				return true
+			}
+		}
+		for _, v := range step.With {
+			if strings.Contains(v, "secrets.") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }
 
 // --- helpers ---

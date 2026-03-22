@@ -20,13 +20,14 @@ const (
 
 // Finding represents a single security finding in a workflow file.
 type Finding struct {
-	RuleID     string `json:"rule_id"`
-	Severity   string `json:"severity"`
-	Confidence string `json:"confidence,omitempty"`
-	File       string `json:"file"`
-	Line       int    `json:"line"`
-	Message    string `json:"message"`
-	Details    string `json:"details,omitempty"`
+	RuleID      string   `json:"rule_id"`
+	Severity    string   `json:"severity"`
+	Confidence  string   `json:"confidence,omitempty"`
+	File        string   `json:"file"`
+	Line        int      `json:"line"`
+	Message     string   `json:"message"`
+	Details     string   `json:"details,omitempty"`
+	Mitigations []string `json:"mitigations,omitempty"`
 }
 
 func (f Finding) String() string {

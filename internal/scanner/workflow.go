@@ -19,12 +19,13 @@ type Workflow struct {
 
 // TriggerConfig captures which events trigger the workflow.
 type TriggerConfig struct {
-	PullRequestTarget bool
-	PullRequest       bool
-	IssueComment      bool
-	WorkflowRun       bool
-	Push              bool
-	Issues            bool
+	PullRequestTarget      bool
+	PullRequestTargetTypes []string // e.g., ["labeled"], ["opened", "synchronize"]
+	PullRequest            bool
+	IssueComment           bool
+	WorkflowRun            bool
+	Push                   bool
+	Issues                 bool
 }
 
 // PermissionsConfig represents workflow or job-level permissions.
@@ -38,6 +39,8 @@ type PermissionsConfig struct {
 // Job represents a single job in a workflow.
 type Job struct {
 	Name        string
+	If          string // raw if: conditional string
+	Environment string // environment protection name, if set
 	Permissions PermissionsConfig
 	Steps       []Step
 	Secrets     string // "inherit" or empty
@@ -46,6 +49,7 @@ type Job struct {
 // Step represents a single step in a job.
 type Step struct {
 	Name string
+	If   string // raw if: conditional
 	Uses string
 	With map[string]string
 	Run  string
@@ -63,6 +67,8 @@ type rawWorkflow struct {
 
 type rawJob struct {
 	Name        string            `yaml:"name"`
+	If          string            `yaml:"if"`
+	Environment yaml.Node         `yaml:"environment"`
 	Permissions yaml.Node         `yaml:"permissions"`
 	Steps       []rawStep         `yaml:"steps"`
 	Secrets     string            `yaml:"secrets"`
@@ -70,6 +76,7 @@ type rawJob struct {
 
 type rawStep struct {
 	Name string            `yaml:"name"`
+	If   string            `yaml:"if"`
 	Uses string            `yaml:"uses"`
 	With map[string]string `yaml:"with"`
 	Run  string            `yaml:"run"`
@@ -114,12 +121,15 @@ func ParseWorkflow(data []byte, path string) (*Workflow, error) {
 	for jobName, rawJ := range raw.Jobs {
 		job := Job{
 			Name:        rawJ.Name,
+			If:          rawJ.If,
+			Environment: parseEnvironment(&rawJ.Environment),
 			Permissions: parsePermissions(&rawJ.Permissions),
 			Secrets:     rawJ.Secrets,
 		}
 		for i, rawS := range rawJ.Steps {
 			step := Step{
 				Name: rawS.Name,
+				If:   rawS.If,
 				Uses: rawS.Uses,
 				With: rawS.With,
 				Run:  rawS.Run,
@@ -195,7 +205,25 @@ func parseTriggers(node *yaml.Node) TriggerConfig {
 		}
 	case yaml.MappingNode:
 		for i := 0; i < len(node.Content)-1; i += 2 {
-			applyTrigger(&tc, node.Content[i].Value)
+			key := node.Content[i].Value
+			applyTrigger(&tc, key)
+			// Extract types for pull_request_target
+			if key == "pull_request_target" {
+				valNode := node.Content[i+1]
+				if valNode.Kind == yaml.MappingNode {
+					for j := 0; j < len(valNode.Content)-1; j += 2 {
+						if valNode.Content[j].Value == "types" {
+							typesNode := valNode.Content[j+1]
+							if typesNode.Kind == yaml.SequenceNode {
+								for _, t := range typesNode.Content {
+									tc.PullRequestTargetTypes = append(
+										tc.PullRequestTargetTypes, t.Value)
+								}
+							}
+						}
+					}
+				}
+			}
 		}
 	}
 	return tc
@@ -245,6 +273,25 @@ func parsePermissions(node *yaml.Node) PermissionsConfig {
 		}
 	}
 	return pc
+}
+
+// parseEnvironment extracts the environment name from a job's environment field.
+// Handles both string form ("production") and mapping form ({name: "production", url: "..."}).
+func parseEnvironment(node *yaml.Node) string {
+	if node == nil || node.Kind == 0 {
+		return ""
+	}
+	switch node.Kind {
+	case yaml.ScalarNode:
+		return node.Value
+	case yaml.MappingNode:
+		for i := 0; i < len(node.Content)-1; i += 2 {
+			if node.Content[i].Value == "name" {
+				return node.Content[i+1].Value
+			}
+		}
+	}
+	return ""
 }
 
 // HasElevatedPermissions checks if the workflow/job has write permissions.

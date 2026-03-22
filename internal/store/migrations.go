@@ -30,3 +30,7 @@ CREATE INDEX IF NOT EXISTS idx_findings_severity ON findings(severity);
 CREATE INDEX IF NOT EXISTS idx_findings_repo ON findings(repo_id);
 CREATE INDEX IF NOT EXISTS idx_repos_stars ON repos(stars DESC);
 `
+
+const migration001AddSource = `
+ALTER TABLE repos ADD COLUMN source TEXT DEFAULT 'top-1000';
+`
