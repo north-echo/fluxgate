@@ -1,0 +1,27 @@
+name: Size Diff
+on:
+  pull_request_target:
+
+jobs:
+  szdiff:
+    permissions:
+      contents: read
+      pull-requests: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: pr
+      - name: Checkout base
+        uses: actions/checkout@v4
+        with:
+          path: base
+      - name: Count Diff
+        run: |
+          BASE="$GITHUB_WORKSPACE/base"
+          PR="$GITHUB_WORKSPACE/pr"
+          pip install tabulate $BASE
+          cp "$BASE/sz.py" .
+          python sz.py "$BASE" "$PR"

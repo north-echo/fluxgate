@@ -892,6 +892,7 @@ func containsMaintainerCheck(step Step) bool {
 
 // referencesForkPath checks if a run block executes code from the fork checkout path.
 func referencesForkPath(run string, checkoutPath string) bool {
+	// Direct path patterns
 	execPatterns := []string{
 		"cd " + checkoutPath,
 		"./" + checkoutPath + "/",
@@ -899,6 +900,9 @@ func referencesForkPath(run string, checkoutPath string) bool {
 		"pip install " + checkoutPath,
 		"pip install -e " + checkoutPath,
 		"npm install --prefix " + checkoutPath,
+		// $GITHUB_WORKSPACE-relative references
+		"$GITHUB_WORKSPACE/" + checkoutPath,
+		"${GITHUB_WORKSPACE}/" + checkoutPath,
 	}
 	for _, p := range execPatterns {
 		if strings.Contains(run, p) {
@@ -916,6 +920,51 @@ func referencesForkPath(run string, checkoutPath string) bool {
 			}
 		}
 	}
+
+	// Detect shell variable aliases for the fork path.
+	// Pattern: VAR="$GITHUB_WORKSPACE/<path>" or VAR="./<path>" followed by
+	// usage of $VAR in a non-data command (e.g., python script.py "$VAR").
+	aliasPatterns := []string{
+		"$GITHUB_WORKSPACE/" + checkoutPath,
+		"${GITHUB_WORKSPACE}/" + checkoutPath,
+		"./" + checkoutPath,
+		"\"" + checkoutPath + "\"",
+	}
+	lines := strings.Split(run, "\n")
+	var aliasVars []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		for _, ap := range aliasPatterns {
+			if strings.Contains(line, ap) {
+				// Check for variable assignment: VAR="..." or VAR=...
+				if eqIdx := strings.Index(line, "="); eqIdx > 0 {
+					varName := strings.TrimSpace(line[:eqIdx])
+					// Must be a simple identifier (no spaces, starts with letter/underscore)
+					if len(varName) > 0 && !strings.ContainsAny(varName, " \t$()") {
+						aliasVars = append(aliasVars, "$"+varName, "${"+varName+"}")
+					}
+				}
+			}
+		}
+	}
+
+	// Check if any alias variable is used in a non-data command
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		for _, av := range aliasVars {
+			if strings.Contains(line, av) {
+				// Skip the assignment line itself and data-only commands
+				if strings.Contains(line, "=") && strings.HasPrefix(line, strings.TrimPrefix(strings.TrimPrefix(av, "${"), "$")) {
+					continue
+				}
+				if isDataOnlyCommand(line) {
+					continue
+				}
+				return true
+			}
+		}
+	}
+
 	return false
 }
 

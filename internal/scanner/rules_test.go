@@ -603,6 +603,31 @@ func TestSeverityFilter(t *testing.T) {
 	}
 }
 
+// TestCheckPwnRequest_PathAliasExec verifies that fork path detection works
+// when the checkout path is referenced via a shell variable alias (e.g.,
+// PR="$GITHUB_WORKSPACE/pr" followed by python script.py "$PR").
+// This is the tinygrad/szdiff.yml pattern.
+func TestCheckPwnRequest_PathAliasExec(t *testing.T) {
+	wf := loadFixture(t, "path-alias-exec.yaml")
+	findings := CheckPwnRequest(wf)
+
+	if len(findings) == 0 {
+		t.Fatal("expected at least 1 FG-001 finding")
+	}
+
+	// The szdiff job should NOT have PathIsolated mitigation because
+	// $PR (aliasing $GITHUB_WORKSPACE/pr) is used in python sz.py "$PR"
+	for _, f := range findings {
+		if f.RuleID == "FG-001" {
+			for _, m := range f.Mitigations {
+				if strings.Contains(m, "no direct execution of fork path") {
+					t.Errorf("PathIsolated mitigation should not apply when fork path is aliased via shell variable: %s", m)
+				}
+			}
+		}
+	}
+}
+
 func TestRuleFilter(t *testing.T) {
 	wf := loadFixture(t, "mixed-workflow.yaml")
 	opts := ScanOptions{Rules: []string{"FG-002"}}
