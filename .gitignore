@@ -7,6 +7,19 @@ dist/
 *.db-wal
 *.db-shm
 
+# Private research (see SECURITY-BOUNDARIES.md)
+prompts/
+queries/
+scans/
+findings/
+reports/
+MEMORY.md
+*.sql
+
+# Environment and secrets
+.env
+.env.*
+
 # Editor/OS
 .DS_Store
 *.swp
