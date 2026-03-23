@@ -459,6 +459,136 @@ func TestCheckPwnRequest_PathExec(t *testing.T) {
 	}
 }
 
+// --- FG-008 OIDC tests ---
+
+func TestCheckOIDC_PRTWithForkCheckout(t *testing.T) {
+	wf := loadFixture(t, "oidc-prt-fork-checkout.yaml")
+	findings := CheckOIDCMisconfiguration(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(findings))
+	}
+	f := findings[0]
+	if f.RuleID != "FG-008" {
+		t.Errorf("expected FG-008, got %s", f.RuleID)
+	}
+	if f.Severity != SeverityCritical {
+		t.Errorf("expected critical (PRT + fork checkout + cloud auth), got %s", f.Severity)
+	}
+	if !strings.Contains(f.Message, "aws-actions/configure-aws-credentials") {
+		t.Error("expected message to mention AWS auth action")
+	}
+}
+
+func TestCheckOIDC_PRTNoFork(t *testing.T) {
+	wf := loadFixture(t, "oidc-prt-no-fork.yaml")
+	findings := CheckOIDCMisconfiguration(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(findings))
+	}
+	f := findings[0]
+	if f.Severity != SeverityHigh {
+		t.Errorf("expected high (PRT but no fork checkout), got %s", f.Severity)
+	}
+}
+
+func TestCheckOIDC_PushOnly(t *testing.T) {
+	wf := loadFixture(t, "oidc-push-only.yaml")
+	findings := CheckOIDCMisconfiguration(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 info finding for push-only OIDC, got %d", len(findings))
+	}
+	if findings[0].Severity != SeverityInfo {
+		t.Errorf("expected info for push-only OIDC, got %s", findings[0].Severity)
+	}
+}
+
+// --- FG-009 Self-Hosted Runner tests ---
+
+func TestCheckSelfHosted_PR(t *testing.T) {
+	wf := loadFixture(t, "self-hosted-pr.yaml")
+	findings := CheckSelfHostedRunner(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(findings))
+	}
+	f := findings[0]
+	if f.RuleID != "FG-009" {
+		t.Errorf("expected FG-009, got %s", f.RuleID)
+	}
+	if f.Severity != SeverityHigh {
+		t.Errorf("expected high severity for self-hosted on PR, got %s", f.Severity)
+	}
+}
+
+func TestCheckSelfHosted_PRTFork(t *testing.T) {
+	wf := loadFixture(t, "self-hosted-prt-fork.yaml")
+	findings := CheckSelfHostedRunner(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(findings))
+	}
+	f := findings[0]
+	if f.Severity != SeverityCritical {
+		t.Errorf("expected critical (PRT + fork checkout on self-hosted), got %s", f.Severity)
+	}
+}
+
+func TestCheckSelfHosted_PushOnly(t *testing.T) {
+	wf := loadFixture(t, "self-hosted-push-only.yaml")
+	findings := CheckSelfHostedRunner(wf)
+
+	if len(findings) != 0 {
+		t.Fatalf("expected 0 findings for push-only self-hosted, got %d", len(findings))
+	}
+}
+
+// --- FG-010 Cache Poisoning tests ---
+
+func TestCheckCachePoisoning_PRT(t *testing.T) {
+	wf := loadFixture(t, "cache-poisoning-prt.yaml")
+	findings := CheckCachePoisoning(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(findings))
+	}
+	f := findings[0]
+	if f.RuleID != "FG-010" {
+		t.Errorf("expected FG-010, got %s", f.RuleID)
+	}
+	if f.Severity != SeverityHigh {
+		t.Errorf("expected high for cache on PRT with fork exec, got %s", f.Severity)
+	}
+}
+
+func TestCheckCachePoisoning_PR(t *testing.T) {
+	wf := loadFixture(t, "cache-poisoning-pr.yaml")
+	findings := CheckCachePoisoning(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(findings))
+	}
+	f := findings[0]
+	if f.Severity != SeverityMedium {
+		t.Errorf("expected medium for cache on PR, got %s", f.Severity)
+	}
+}
+
+func TestCheckCachePoisoning_SetupAction(t *testing.T) {
+	wf := loadFixture(t, "cache-setup-action.yaml")
+	findings := CheckCachePoisoning(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding for setup-node with cache, got %d", len(findings))
+	}
+	f := findings[0]
+	if f.Severity != SeverityLow {
+		t.Errorf("expected low for setup-action caching, got %s", f.Severity)
+	}
+}
+
 // --- Filter tests ---
 
 func TestSeverityFilter(t *testing.T) {

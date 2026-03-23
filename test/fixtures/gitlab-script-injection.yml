@@ -1,0 +1,12 @@
+stages:
+  - lint
+
+check_title:
+  stage: lint
+  script:
+    - echo "Checking MR title: $CI_MERGE_REQUEST_TITLE"
+    - |
+      if echo "$CI_MERGE_REQUEST_TITLE" | grep -q "WIP"; then
+        echo "MR is WIP, skipping"
+        exit 0
+      fi

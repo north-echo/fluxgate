@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	gh "github.com/google/go-github/v60/github"
@@ -76,7 +77,7 @@ func (c *Client) DiscoverRepos(ctx context.Context, opts DiscoverOptions) ([]Rep
 					return r, resp, err
 				})
 				if err != nil {
-					fmt.Printf("  Warning: could not fetch repo info for %s: %v\n", key, err)
+					fmt.Fprintf(os.Stderr, "  Warning: could not fetch repo info for %s: %v\n", key, err)
 					continue
 				}
 				stars = fullRepo.GetStargazersCount()

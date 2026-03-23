@@ -1,0 +1,12 @@
+name: GPU Tests
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  gpu-test:
+    runs-on: [self-hosted, linux, gpu]
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install -e ".[test]"
+      - run: pytest tests/gpu/

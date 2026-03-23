@@ -138,7 +138,7 @@ func (c *Client) BatchScan(ctx context.Context, repos []RepoInfo, opts BatchOpti
 			// Store the repo as scanned but with 0 findings so we don't retry
 			emptyResult := &scanner.ScanResult{Path: fmt.Sprintf("%s/%s", repo.Owner, repo.Name)}
 			if saveErr := opts.DB.SaveResult(repo.Owner, repo.Name, repo.Stars, repo.Language, emptyResult); saveErr != nil {
-				fmt.Printf("  Warning: could not save error state: %v\n", saveErr)
+				fmt.Fprintf(os.Stderr, "  Warning: could not save error state: %v\n", saveErr)
 			}
 			continue
 		}

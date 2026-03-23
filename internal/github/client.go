@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	gh "github.com/google/go-github/v60/github"
@@ -54,7 +55,7 @@ func (c *Client) FetchWorkflows(ctx context.Context, owner, repo string) ([]Work
 
 		content, err := c.fetchFileContent(ctx, owner, repo, entry.GetPath())
 		if err != nil {
-			fmt.Printf("  Warning: could not fetch %s: %v\n", entry.GetPath(), err)
+			fmt.Fprintf(os.Stderr, "  Warning: could not fetch %s: %v\n", entry.GetPath(), err)
 			continue
 		}
 
@@ -99,7 +100,7 @@ func (c *Client) ScanRemote(ctx context.Context, owner, repo string, opts scanne
 	for _, wf := range workflows {
 		findings, err := scanner.ScanWorkflowBytes(wf.Content, wf.Path, opts)
 		if err != nil {
-			fmt.Printf("  Warning: could not parse %s: %v\n", wf.Path, err)
+			fmt.Fprintf(os.Stderr, "  Warning: could not parse %s: %v\n", wf.Path, err)
 			continue
 		}
 		result.Findings = append(result.Findings, findings...)

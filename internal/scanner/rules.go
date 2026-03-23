@@ -19,6 +19,9 @@ func AllRules() map[string]Rule {
 		"FG-005": CheckSecretsInLogs,
 		"FG-006": CheckForkPRCodeExec,
 		"FG-007": CheckTokenExposure,
+		"FG-008": CheckOIDCMisconfiguration,
+		"FG-009": CheckSelfHostedRunner,
+		"FG-010": CheckCachePoisoning,
 	}
 }
 
@@ -31,6 +34,9 @@ var RuleDescriptions = map[string]string{
 	"FG-005": "Secrets in Logs",
 	"FG-006": "Fork PR Code Execution",
 	"FG-007": "Token Exposure in Build Steps",
+	"FG-008": "OIDC Misconfiguration",
+	"FG-009": "Self-Hosted Runner",
+	"FG-010": "Cache Poisoning",
 }
 
 // ExecutionAnalysis captures the result of post-checkout step analysis.
@@ -999,6 +1005,328 @@ func containsExpression(run, expr string) bool {
 	// Match ${{ expr }} with optional whitespace
 	return strings.Contains(run, "${{ "+expr) ||
 		strings.Contains(run, "${{"+expr)
+}
+
+// githubHostedPrefixes lists runner labels that indicate GitHub-hosted runners.
+var githubHostedPrefixes = []string{
+	"ubuntu-", "windows-", "macos-",
+}
+
+// githubHostedExact lists exact runner labels that indicate GitHub-hosted runners.
+var githubHostedExact = []string{
+	"ubuntu-latest", "windows-latest", "macos-latest",
+	"macos-13", "macos-14", "macos-15",
+}
+
+// isSelfHostedRunner checks if the runs-on labels indicate a self-hosted runner.
+func isSelfHostedRunner(labels []string) bool {
+	for _, label := range labels {
+		lower := strings.ToLower(label)
+		if lower == "self-hosted" {
+			return true
+		}
+	}
+	// If no labels match known GitHub-hosted patterns, it's likely self-hosted
+	if len(labels) == 0 {
+		return false
+	}
+	for _, label := range labels {
+		lower := strings.ToLower(label)
+		isGitHubHosted := false
+		for _, exact := range githubHostedExact {
+			if lower == exact {
+				isGitHubHosted = true
+				break
+			}
+		}
+		if !isGitHubHosted {
+			for _, prefix := range githubHostedPrefixes {
+				if strings.HasPrefix(lower, prefix) {
+					isGitHubHosted = true
+					break
+				}
+			}
+		}
+		if isGitHubHosted {
+			return false // At least one label matches a GitHub-hosted runner
+		}
+	}
+	// All labels are non-standard — could be self-hosted or custom runner group
+	// Only flag if "self-hosted" is explicitly present to avoid false positives
+	return false
+}
+
+// CheckOIDCMisconfiguration detects id-token:write permissions on externally-triggered
+// workflows where an attacker could mint cloud credentials (FG-008).
+func CheckOIDCMisconfiguration(wf *Workflow) []Finding {
+	var findings []Finding
+
+	isExternalTrigger := wf.On.PullRequestTarget || wf.On.IssueComment
+
+	for jobName, job := range wf.Jobs {
+		hasIDTokenWrite := false
+
+		// Check job-level permissions first, then workflow-level
+		if job.Permissions.Scopes["id-token"] == "write" {
+			hasIDTokenWrite = true
+		} else if !job.Permissions.Set && wf.Permissions.Scopes["id-token"] == "write" {
+			hasIDTokenWrite = true
+		}
+
+		if !hasIDTokenWrite {
+			continue
+		}
+
+		// Check for cloud credential actions
+		var cloudActions []string
+		for _, step := range job.Steps {
+			if step.Uses == "" {
+				continue
+			}
+			actionName := step.Uses
+			if idx := strings.Index(actionName, "@"); idx != -1 {
+				actionName = actionName[:idx]
+			}
+			switch actionName {
+			case "aws-actions/configure-aws-credentials",
+				"google-github-actions/auth",
+				"azure/login",
+				"hashicorp/vault-action":
+				cloudActions = append(cloudActions, actionName)
+			}
+		}
+
+		if wf.On.PullRequestTarget {
+			// Check if this job also checks out fork code
+			checkoutsFork := false
+			for _, step := range job.Steps {
+				if isCheckoutAction(step.Uses) && refPointsToPRHead(step.With["ref"]) {
+					checkoutsFork = true
+					break
+				}
+			}
+
+			severity := SeverityHigh
+			if checkoutsFork {
+				severity = SeverityCritical
+			}
+
+			msg := fmt.Sprintf("OIDC Misconfiguration: id-token:write on pull_request_target workflow (job '%s')", jobName)
+			if len(cloudActions) > 0 {
+				msg += fmt.Sprintf(" with cloud auth (%s)", strings.Join(cloudActions, ", "))
+			}
+			if checkoutsFork {
+				msg += " — attacker can mint cloud credentials via fork PR"
+			}
+
+			findings = append(findings, Finding{
+				RuleID:   "FG-008",
+				Severity: severity,
+				File:     wf.Path,
+				Line:     1,
+				Message:  msg,
+				Details:  "id-token:write on pull_request_target allows fork PR authors to request OIDC tokens. If cloud providers have overly broad sub claims, attacker can assume cloud roles.",
+			})
+		} else if isExternalTrigger {
+			findings = append(findings, Finding{
+				RuleID:   "FG-008",
+				Severity: SeverityMedium,
+				File:     wf.Path,
+				Line:     1,
+				Message:  fmt.Sprintf("OIDC Misconfiguration: id-token:write on externally-triggered workflow (job '%s')", jobName),
+				Details:  "id-token:write on external triggers may allow token minting by untrusted actors depending on trigger type.",
+			})
+		} else if len(cloudActions) > 0 {
+			// Informational: OIDC with cloud actions on non-external triggers
+			findings = append(findings, Finding{
+				RuleID:   "FG-008",
+				Severity: SeverityInfo,
+				File:     wf.Path,
+				Line:     1,
+				Message:  fmt.Sprintf("OIDC Configuration: id-token:write with cloud auth in job '%s' (%s)", jobName, strings.Join(cloudActions, ", ")),
+			})
+		}
+	}
+	return findings
+}
+
+// CheckSelfHostedRunner detects self-hosted runners on workflows that accept
+// external input, which risks runner persistence and lateral movement (FG-009).
+func CheckSelfHostedRunner(wf *Workflow) []Finding {
+	var findings []Finding
+
+	acceptsExternalPRs := wf.On.PullRequest || wf.On.PullRequestTarget
+
+	for jobName, job := range wf.Jobs {
+		if !isSelfHostedExplicit(job.RunsOn) {
+			continue
+		}
+
+		// Self-hosted runner on a workflow that accepts external PRs
+		if acceptsExternalPRs {
+			severity := SeverityHigh
+			msg := fmt.Sprintf(
+				"Self-Hosted Runner: job '%s' runs on self-hosted runner with external PR trigger",
+				jobName)
+
+			if wf.On.PullRequestTarget {
+				// Check if it also checks out fork code
+				for _, step := range job.Steps {
+					if isCheckoutAction(step.Uses) && refPointsToPRHead(step.With["ref"]) {
+						severity = SeverityCritical
+						msg += " — fork code executes on self-hosted runner (persistence risk)"
+						break
+					}
+				}
+			}
+
+			// Check for fork guard mitigation
+			if job.If != "" && containsForkGuard(job.If) {
+				severity = SeverityInfo
+				msg += " (mitigated: fork guard)"
+			}
+
+			findings = append(findings, Finding{
+				RuleID:   "FG-009",
+				Severity: severity,
+				File:     wf.Path,
+				Line:     1,
+				Message:  msg,
+				Details:  "Self-hosted runners on public repos accepting PRs allow fork authors to execute code on persistent infrastructure. Non-ephemeral runners risk credential theft, backdoor installation, and lateral movement.",
+			})
+		} else if wf.On.IssueComment || wf.On.WorkflowRun {
+			findings = append(findings, Finding{
+				RuleID:   "FG-009",
+				Severity: SeverityMedium,
+				File:     wf.Path,
+				Line:     1,
+				Message:  fmt.Sprintf("Self-Hosted Runner: job '%s' runs on self-hosted runner with external trigger", jobName),
+				Details:  "Self-hosted runners on externally-triggered workflows may allow untrusted code execution on persistent infrastructure.",
+			})
+		}
+	}
+	return findings
+}
+
+// isSelfHostedExplicit checks if runs-on labels explicitly include "self-hosted".
+func isSelfHostedExplicit(labels []string) bool {
+	for _, label := range labels {
+		if strings.ToLower(label) == "self-hosted" {
+			return true
+		}
+	}
+	return false
+}
+
+// CheckCachePoisoning detects shared cache usage across trust boundaries that
+// could enable cache poisoning attacks (FG-010).
+func CheckCachePoisoning(wf *Workflow) []Finding {
+	var findings []Finding
+
+	isExternalTrigger := wf.On.PullRequestTarget || wf.On.PullRequest
+
+	if !isExternalTrigger {
+		return nil
+	}
+
+	for jobName, job := range wf.Jobs {
+		for _, step := range job.Steps {
+			if step.Uses == "" {
+				continue
+			}
+			actionName := step.Uses
+			if idx := strings.Index(actionName, "@"); idx != -1 {
+				actionName = actionName[:idx]
+			}
+
+			// Detect actions/cache with save on PR workflows
+			if actionName == "actions/cache" || actionName == "actions/cache/save" {
+				// Check if cache key uses attacker-controllable inputs
+				cacheKey := step.With["key"]
+				hasAttackerInput := false
+				attackerInputs := []string{
+					"github.head_ref",
+					"github.event.pull_request",
+					"hashFiles(",
+				}
+				for _, input := range attackerInputs {
+					if strings.Contains(cacheKey, input) {
+						hasAttackerInput = true
+						break
+					}
+				}
+
+				severity := SeverityMedium
+				if wf.On.PullRequestTarget {
+					severity = SeverityHigh
+				}
+
+				msg := fmt.Sprintf(
+					"Cache Poisoning: actions/cache in job '%s' on %s workflow",
+					jobName, describeTrigger(wf))
+				if hasAttackerInput {
+					msg += " with attacker-controllable cache key"
+				}
+
+				// Check if the job also checks out fork code and executes it
+				hasExec := false
+				if wf.On.PullRequestTarget {
+					for _, s := range job.Steps {
+						if isCheckoutAction(s.Uses) && refPointsToPRHead(s.With["ref"]) {
+							postSteps := job.Steps[0:] // simplified — flag the pattern
+							execResult := analyzePostCheckoutExecution(postSteps)
+							if execResult.Confirmed || execResult.Likely {
+								hasExec = true
+							}
+							break
+						}
+					}
+				}
+
+				if hasExec {
+					severity = SeverityHigh
+					msg += " — fork code execution can poison cache for subsequent runs"
+				}
+
+				findings = append(findings, Finding{
+					RuleID:   "FG-010",
+					Severity: severity,
+					File:     wf.Path,
+					Line:     step.Line,
+					Message:  msg,
+					Details:  "Shared caches on PR workflows allow fork authors to poison cache entries. Poisoned caches persist and affect subsequent builds on the default branch, enabling code execution via dependency or build artifact replacement.",
+				})
+			}
+
+			// Detect setup-* actions with built-in caching
+			if strings.HasPrefix(actionName, "actions/setup-") {
+				if step.With["cache"] != "" && step.With["cache"] != "false" {
+					findings = append(findings, Finding{
+						RuleID:   "FG-010",
+						Severity: SeverityLow,
+						File:     wf.Path,
+						Line:     step.Line,
+						Message: fmt.Sprintf(
+							"Cache Poisoning: %s with cache enabled in job '%s' on %s workflow",
+							actionName, jobName, describeTrigger(wf)),
+						Details: "Setup actions with built-in caching on PR workflows may share cache with default branch builds.",
+					})
+				}
+			}
+		}
+	}
+	return findings
+}
+
+// describeTrigger returns a human-readable description of the workflow trigger.
+func describeTrigger(wf *Workflow) string {
+	if wf.On.PullRequestTarget {
+		return "pull_request_target"
+	}
+	if wf.On.PullRequest {
+		return "pull_request"
+	}
+	return "external"
 }
 
 func describePermissions(wfPerms, jobPerms PermissionsConfig) string {

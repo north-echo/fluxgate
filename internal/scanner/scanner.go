@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/north-echo/fluxgate/internal/cicd"
 )
 
 // ScanOptions configures a scan run.
@@ -20,39 +22,48 @@ type ScanResult struct {
 	Findings  []Finding
 }
 
-// ScanDirectory scans all workflow files in a directory's .github/workflows/ folder.
+// ScanDirectory scans all workflow files in a directory's .github/workflows/ folder,
+// and optionally .gitlab-ci.yml if present.
 func ScanDirectory(dir string, opts ScanOptions) (*ScanResult, error) {
+	result := &ScanResult{Path: dir}
+
+	// Scan GitHub Actions workflows
 	workflowDir := filepath.Join(dir, ".github", "workflows")
-	info, err := os.Stat(workflowDir)
-	if err != nil {
-		return nil, err
-	}
-	if !info.IsDir() {
-		return nil, os.ErrNotExist
-	}
-
-	entries, err := os.ReadDir(workflowDir)
-	if err != nil {
-		return nil, err
-	}
-
-	result := &ScanResult{Path: workflowDir}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml") {
-			continue
-		}
-
-		path := filepath.Join(workflowDir, name)
-		findings, err := ScanFile(path, opts)
+	if info, err := os.Stat(workflowDir); err == nil && info.IsDir() {
+		entries, err := os.ReadDir(workflowDir)
 		if err != nil {
-			continue // skip unparseable files
+			return nil, err
 		}
+
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			if !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml") {
+				continue
+			}
+
+			path := filepath.Join(workflowDir, name)
+			findings, err := ScanFile(path, opts)
+			if err != nil {
+				continue // skip unparseable files
+			}
+			result.Workflows++
+			result.Findings = append(result.Findings, findings...)
+		}
+	}
+
+	// Scan GitLab CI if .gitlab-ci.yml exists
+	gitlabPath := filepath.Join(dir, ".gitlab-ci.yml")
+	if data, err := os.ReadFile(gitlabPath); err == nil {
+		glFindings := ScanGitLabCI(data, gitlabPath, opts)
 		result.Workflows++
-		result.Findings = append(result.Findings, findings...)
+		result.Findings = append(result.Findings, glFindings...)
+	}
+
+	if result.Workflows == 0 {
+		return nil, os.ErrNotExist
 	}
 
 	sortFindings(result.Findings)
@@ -114,6 +125,63 @@ func ScanWorkflowBytes(data []byte, path string, opts ScanOptions) ([]Finding, e
 		return nil, err
 	}
 	return ScanWorkflow(wf, opts), nil
+}
+
+// ScanGitLabCI parses and scans a .gitlab-ci.yml file, returning findings
+// in the common Finding format.
+func ScanGitLabCI(data []byte, path string, opts ScanOptions) []Finding {
+	pipeline, err := cicd.ParseGitLabCI(data, path)
+	if err != nil {
+		return nil
+	}
+
+	glFindings := cicd.ScanGitLabPipeline(pipeline)
+
+	// Convert GitLab findings to common Finding type
+	var findings []Finding
+	for _, glf := range glFindings {
+		f := Finding{
+			RuleID:   glf.RuleID,
+			Severity: glf.Severity,
+			File:     glf.File,
+			Line:     glf.Line,
+			Message:  glf.Message,
+			Details:  glf.Details,
+		}
+		findings = append(findings, f)
+	}
+
+	// Apply severity filter
+	if len(opts.Severities) > 0 {
+		sevSet := make(map[string]bool)
+		for _, s := range opts.Severities {
+			sevSet[strings.ToLower(s)] = true
+		}
+		var filtered []Finding
+		for _, f := range findings {
+			if sevSet[f.Severity] {
+				filtered = append(filtered, f)
+			}
+		}
+		findings = filtered
+	}
+
+	// Apply rule filter
+	if len(opts.Rules) > 0 {
+		ruleSet := make(map[string]bool)
+		for _, r := range opts.Rules {
+			ruleSet[r] = true
+		}
+		var filtered []Finding
+		for _, f := range findings {
+			if ruleSet[f.RuleID] {
+				filtered = append(filtered, f)
+			}
+		}
+		findings = filtered
+	}
+
+	return findings
 }
 
 func sortFindings(findings []Finding) {
