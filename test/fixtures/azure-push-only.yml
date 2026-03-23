@@ -1,0 +1,18 @@
+trigger:
+  branches:
+    include:
+      - main
+      - release/*
+
+pr: none
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+steps:
+  - script: npm ci
+    displayName: Install
+  - script: npm run build
+    displayName: Build
+  - script: npm test
+    displayName: Test

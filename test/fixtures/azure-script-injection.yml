@@ -1,0 +1,16 @@
+trigger:
+  - main
+
+pr:
+  - main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+jobs:
+  - job: Greet
+    steps:
+      - script: |
+          echo "Building branch $(Build.SourceBranchName)"
+          echo "Requested by $(Build.RequestedFor)"
+        displayName: Echo branch info

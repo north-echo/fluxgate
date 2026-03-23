@@ -1,0 +1,22 @@
+trigger:
+  - main
+
+resources:
+  repositories:
+    - repository: templates
+      type: github
+      endpoint: my-github-connection
+    - repository: pinned-templates
+      type: github
+      ref: refs/tags/v1.0.0
+      endpoint: my-github-connection
+
+extends:
+  template: build.yml
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+steps:
+  - script: echo hello
+    displayName: Hello
