@@ -22,6 +22,7 @@ func AllRules() map[string]Rule {
 		"FG-008": CheckOIDCMisconfiguration,
 		"FG-009": CheckSelfHostedRunner,
 		"FG-010": CheckCachePoisoning,
+		"FG-011": CheckBotActorTOCTOU,
 	}
 }
 
@@ -37,6 +38,7 @@ var RuleDescriptions = map[string]string{
 	"FG-008": "OIDC Misconfiguration",
 	"FG-009": "Self-Hosted Runner",
 	"FG-010": "Cache Poisoning",
+	"FG-011": "Bot Actor Guard TOCTOU",
 }
 
 // ExecutionAnalysis captures the result of post-checkout step analysis.
@@ -147,9 +149,15 @@ func CheckPwnRequest(wf *Workflow) []Finding {
 		mitigation := analyzeMitigations(wf, job, checkoutIdx, postCheckoutSteps, checkoutPath)
 		mitigated := false
 
-		if mitigation.ForkGuard || mitigation.ActorGuard {
+		if mitigation.ForkGuard {
 			severity = SeverityInfo
 			confidence = ConfidencePatternOnly
+			mitigated = true
+		} else if mitigation.ActorGuard {
+			// Bot actor guards are bypassable via TOCTOU — cap at high, never suppress
+			if severity == SeverityCritical {
+				severity = SeverityHigh
+			}
 			mitigated = true
 		} else if mitigation.LabelGated && mitigation.EnvironmentGated {
 			severity = downgradeBy(severity, 2)
@@ -368,6 +376,8 @@ func CheckScriptInjection(wf *Workflow) []Finding {
 		"github.event.head_commit.message",
 		"github.head_ref",
 		"github.event.workflow_run.head_branch",
+		"github.event.inputs.",
+		"inputs.",
 	}
 
 	var findings []Finding
@@ -1363,6 +1373,98 @@ func CheckCachePoisoning(wf *Workflow) []Finding {
 				}
 			}
 		}
+	}
+	return findings
+}
+
+// CheckBotActorTOCTOU detects workflows where a bot actor guard (e.g.,
+// if: github.actor == 'dependabot[bot]') protects a fork checkout + execution
+// path that may be bypassable via TOCTOU: an attacker updates their PR commit
+// after the bot triggers the workflow but before the runner resolves the SHA (FG-011).
+func CheckBotActorTOCTOU(wf *Workflow) []Finding {
+	if !wf.On.PullRequestTarget && !wf.On.WorkflowRun {
+		return nil
+	}
+
+	var findings []Finding
+	for jobName, job := range wf.Jobs {
+		// Must have a bot actor guard
+		isBot := false
+		if job.If != "" {
+			isBot, _ = containsActorGuard(job.If)
+		}
+		// Also check needs chain for inherited actor guards
+		if !isBot {
+			for _, depName := range job.Needs {
+				if dep, ok := wf.Jobs[depName]; ok {
+					if dep.If != "" {
+						isBot, _ = containsActorGuard(dep.If)
+						if isBot {
+							break
+						}
+					}
+				}
+			}
+		}
+		if !isBot {
+			continue
+		}
+
+		// Must have fork checkout
+		checkoutIdx := -1
+		checkoutPath := ""
+		for i, step := range job.Steps {
+			if isCheckoutAction(step.Uses) && refPointsToPRHead(step.With["ref"]) {
+				checkoutIdx = i
+				checkoutPath = step.With["path"]
+				break
+			}
+		}
+		if checkoutIdx == -1 {
+			continue
+		}
+
+		// Must have post-checkout execution
+		postCheckoutSteps := job.Steps[checkoutIdx+1:]
+		execResult := analyzePostCheckoutExecution(postCheckoutSteps)
+
+		// Also check path isolation — if fork code is isolated and not executed, skip
+		if checkoutPath != "" {
+			hasForkExec := false
+			for _, step := range postCheckoutSteps {
+				if step.Run != "" && referencesForkPath(step.Run, checkoutPath) {
+					hasForkExec = true
+					break
+				}
+			}
+			if !hasForkExec && !execResult.Confirmed && !execResult.Likely {
+				continue
+			}
+		} else if !execResult.Confirmed && !execResult.Likely {
+			continue
+		}
+
+		trigger := "pull_request_target"
+		if !wf.On.PullRequestTarget && wf.On.WorkflowRun {
+			trigger = "workflow_run"
+		}
+
+		msg := fmt.Sprintf(
+			"Bot Actor Guard TOCTOU: job '%s' on %s has bot actor guard with fork checkout + execution — "+
+				"attacker can update PR commit after bot triggers workflow but before runner resolves SHA",
+			jobName, trigger)
+
+		findings = append(findings, Finding{
+			RuleID:   "FG-011",
+			Severity: SeverityMedium,
+			File:     wf.Path,
+			Line:     1,
+			Message:  msg,
+			Details: "Bot-delegated TOCTOU: if: github.actor == 'dependabot[bot]' guards are " +
+				"bypassable when an attacker pushes a new commit between the bot trigger event " +
+				"and the runner's checkout. The workflow runs the attacker's code with the bot's privileges. " +
+				"See BoostSecurity 'Weaponizing Dependabot' research.",
+		})
 	}
 	return findings
 }

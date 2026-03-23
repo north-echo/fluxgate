@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -110,6 +111,9 @@ func ScanWorkflow(wf *Workflow, opts ScanOptions) []Finding {
 		results := rule(wf)
 		findings = append(findings, results...)
 	}
+
+	// Post-scan correlation: merge FG-001+FG-002 co-occurrences
+	findings = CorrelatePwnRequestInjection(findings)
 
 	if len(opts.Severities) > 0 {
 		sevSet := make(map[string]bool)
@@ -249,6 +253,70 @@ func ScanAzurePipelines(data []byte, path string, opts ScanOptions) []Finding {
 	}
 
 	return findings
+}
+
+// CorrelatePwnRequestInjection runs after all rules complete and merges
+// co-occurring FG-001 (confirmed) + FG-002 findings on the same file into a
+// single enhanced finding with the Ultralytics attack pattern narrative.
+// The original FG-001 and FG-002 findings are replaced by the merged finding.
+func CorrelatePwnRequestInjection(findings []Finding) []Finding {
+	// Index FG-001 findings by file — any confidence level qualifies because
+	// the co-occurrence of FG-002 itself proves attacker-controlled execution
+	fg001ByFile := make(map[string]int) // file -> index in findings
+	for i, f := range findings {
+		if f.RuleID == "FG-001" {
+			fg001ByFile[f.File] = i
+		}
+	}
+
+	if len(fg001ByFile) == 0 {
+		return findings
+	}
+
+	// Find FG-002 findings on the same files
+	mergedFiles := make(map[string]bool)
+	var fg002Exprs []string
+	for _, f := range findings {
+		if f.RuleID == "FG-002" {
+			if _, ok := fg001ByFile[f.File]; ok {
+				mergedFiles[f.File] = true
+				fg002Exprs = append(fg002Exprs, f.Message)
+			}
+		}
+	}
+
+	if len(mergedFiles) == 0 {
+		return findings
+	}
+
+	// Build merged findings and filter out originals
+	var result []Finding
+	for _, f := range findings {
+		if mergedFiles[f.File] && (f.RuleID == "FG-001" || f.RuleID == "FG-002") {
+			// Skip — will be replaced by merged finding
+			if f.RuleID == "FG-001" {
+				// Emit the merged finding in place of FG-001
+				merged := Finding{
+					RuleID:     "FG-001",
+					Severity:   SeverityCritical,
+					Confidence: f.Confidence,
+					File:       f.File,
+					Line:       f.Line,
+					Message: fmt.Sprintf(
+						"Pwn Request + Script Injection: fork checkout with attacker-controlled expression in run block (Ultralytics pattern) [%s]",
+						f.Confidence),
+					Details: f.Details + " | Combined FG-001+FG-002: attacker controls both checked-out code AND " +
+						"expressions interpolated into shell commands. This is the exact attack chain used in the " +
+						"Ultralytics compromise (pull_request_target → shell injection via branch name → credential exfiltration).",
+					Mitigations: f.Mitigations,
+				}
+				result = append(result, merged)
+			}
+			continue
+		}
+		result = append(result, f)
+	}
+	return result
 }
 
 func sortFindings(findings []Finding) {
