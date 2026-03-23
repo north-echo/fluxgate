@@ -247,11 +247,26 @@ func extractScriptSteps(name string, node *yaml.Node, jobNode *yaml.Node) []Pipe
 		})
 	case yaml.SequenceNode:
 		for _, item := range node.Content {
+			cmd := item.Value
+			line := item.Line
+			// When YAML parses an unquoted script line containing ": " (e.g.
+			// echo "foo: $BAR"), it interprets it as a mapping node instead
+			// of a scalar. Reconstruct the original string from the key-value.
+			if item.Kind == yaml.MappingNode && len(item.Content) >= 2 {
+				key := item.Content[0].Value
+				val := item.Content[1].Value
+				if val != "" {
+					cmd = key + ": " + val
+				} else {
+					cmd = key
+				}
+				line = item.Content[0].Line
+			}
 			steps = append(steps, PipelineStep{
 				Name:    name,
 				Type:    StepScript,
-				Command: item.Value,
-				Line:    item.Line,
+				Command: cmd,
+				Line:    line,
 			})
 		}
 	}
