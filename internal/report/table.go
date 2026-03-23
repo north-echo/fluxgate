@@ -11,7 +11,7 @@ import (
 
 // WriteTable writes findings as a human-readable table.
 func WriteTable(w io.Writer, result *scanner.ScanResult) {
-	fmt.Fprintln(w, "fluxgate v0.5.0 — CI/CD Pipeline Security Gate")
+	fmt.Fprintln(w, "fluxgate v0.6.0 — CI/CD Pipeline Security Gate")
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "Scanning: %s\n\n", result.Path)
 

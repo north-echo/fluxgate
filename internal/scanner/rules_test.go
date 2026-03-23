@@ -218,20 +218,51 @@ func TestMixedWorkflow_MultipleFindings(t *testing.T) {
 	opts := ScanOptions{}
 	findings := ScanWorkflow(wf, opts)
 
-	if len(findings) < 3 {
-		t.Fatalf("expected at least 3 findings for mixed workflow, got %d", len(findings))
+	if len(findings) < 2 {
+		t.Fatalf("expected at least 2 findings for mixed workflow, got %d", len(findings))
 	}
 
 	rulesSeen := map[string]bool{}
 	for _, f := range findings {
 		rulesSeen[f.RuleID] = true
 	}
-	// Should trigger FG-001 (pwn request), FG-002 (script injection),
-	// FG-003 (tag pinning), FG-004 (broad permissions)
-	for _, expected := range []string{"FG-001", "FG-002", "FG-003"} {
+	// FG-001 and FG-002 are correlated into a single merged FG-001 finding
+	// FG-003 (tag pinning) should still fire separately
+	for _, expected := range []string{"FG-001", "FG-003"} {
 		if !rulesSeen[expected] {
 			t.Errorf("expected rule %s to fire on mixed workflow", expected)
 		}
+	}
+	// FG-002 should be absorbed into the merged FG-001
+	if rulesSeen["FG-002"] {
+		t.Error("expected FG-002 to be merged into FG-001 via correlation, but it still appears separately")
+	}
+}
+
+func TestCorrelation_PwnRequestPlusInjection(t *testing.T) {
+	wf := loadFixture(t, "mixed-workflow.yaml")
+	opts := ScanOptions{}
+	findings := ScanWorkflow(wf, opts)
+
+	// Find the correlated FG-001 finding
+	var merged *Finding
+	for i, f := range findings {
+		if f.RuleID == "FG-001" {
+			merged = &findings[i]
+			break
+		}
+	}
+	if merged == nil {
+		t.Fatal("expected merged FG-001 finding")
+	}
+	if merged.Severity != SeverityCritical {
+		t.Errorf("expected critical severity for merged finding, got %s", merged.Severity)
+	}
+	if !strings.Contains(merged.Message, "Ultralytics") {
+		t.Error("expected merged finding to reference Ultralytics pattern")
+	}
+	if !strings.Contains(merged.Details, "FG-001+FG-002") {
+		t.Error("expected merged finding details to mention FG-001+FG-002 correlation")
 	}
 }
 
@@ -356,8 +387,9 @@ func TestCheckPwnRequest_ActorGuardBot(t *testing.T) {
 		t.Fatalf("expected 1 finding, got %d", len(findings))
 	}
 	f := findings[0]
-	if f.Severity != SeverityInfo {
-		t.Errorf("expected info severity for bot actor guard, got %s", f.Severity)
+	// Bot actor guards are TOCTOU-bypassable — cap at high, never suppress to info
+	if f.Severity != SeverityHigh {
+		t.Errorf("expected high severity for bot actor guard (TOCTOU cap), got %s", f.Severity)
 	}
 	if len(f.Mitigations) == 0 {
 		t.Error("expected mitigations to be populated")
@@ -624,6 +656,76 @@ func TestCheckPwnRequest_PathAliasExec(t *testing.T) {
 					t.Errorf("PathIsolated mitigation should not apply when fork path is aliased via shell variable: %s", m)
 				}
 			}
+		}
+	}
+}
+
+// --- FG-011 Bot Actor Guard TOCTOU tests ---
+
+func TestCheckBotActorTOCTOU_PRT(t *testing.T) {
+	wf := loadFixture(t, "bot-actor-guard-toctou.yaml")
+	findings := CheckBotActorTOCTOU(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 FG-011 finding, got %d", len(findings))
+	}
+	f := findings[0]
+	if f.RuleID != "FG-011" {
+		t.Errorf("expected FG-011, got %s", f.RuleID)
+	}
+	if f.Severity != SeverityMedium {
+		t.Errorf("expected medium severity, got %s", f.Severity)
+	}
+	if !strings.Contains(f.Message, "pull_request_target") {
+		t.Error("expected message to mention pull_request_target trigger")
+	}
+	if !strings.Contains(f.Message, "TOCTOU") {
+		t.Error("expected message to mention TOCTOU")
+	}
+}
+
+func TestCheckBotActorTOCTOU_WorkflowRun(t *testing.T) {
+	wf := loadFixture(t, "workflow-run-toctou.yaml")
+	findings := CheckBotActorTOCTOU(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 FG-011 finding for workflow_run, got %d", len(findings))
+	}
+	f := findings[0]
+	if f.RuleID != "FG-011" {
+		t.Errorf("expected FG-011, got %s", f.RuleID)
+	}
+	if !strings.Contains(f.Message, "workflow_run") {
+		t.Error("expected message to mention workflow_run trigger")
+	}
+}
+
+func TestCheckBotActorTOCTOU_NoBotGuard(t *testing.T) {
+	// A PRT workflow without actor guard should not fire FG-011
+	wf := loadFixture(t, "pwn-request.yaml")
+	findings := CheckBotActorTOCTOU(wf)
+
+	if len(findings) != 0 {
+		t.Fatalf("expected 0 findings for workflow without bot actor guard, got %d", len(findings))
+	}
+}
+
+// --- FG-002 extension: workflow_dispatch/call injection ---
+
+func TestCheckScriptInjection_DispatchInputs(t *testing.T) {
+	wf := loadFixture(t, "dispatch-injection.yaml")
+	findings := CheckScriptInjection(wf)
+
+	// Should find: inputs.* and github.event.inputs.* (2 pattern matches on the run block)
+	if len(findings) < 2 {
+		t.Fatalf("expected at least 2 injection findings for dispatch inputs, got %d", len(findings))
+	}
+	for _, f := range findings {
+		if f.RuleID != "FG-002" {
+			t.Errorf("expected FG-002, got %s", f.RuleID)
+		}
+		if f.Severity != SeverityHigh {
+			t.Errorf("expected high severity, got %s", f.Severity)
 		}
 	}
 }

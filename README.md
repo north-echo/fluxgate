@@ -22,13 +22,40 @@ go install github.com/north-echo/fluxgate/cmd/fluxgate@latest
 
 ## What It Detects
 
+### GitHub Actions (FG-xxx)
+
 | Rule    | Severity | Description |
 |---------|----------|-------------|
 | FG-001  | Critical | Pwn Request: pull_request_target with fork checkout |
-| FG-002  | High     | Script Injection via expression interpolation |
+| FG-002  | High     | Script Injection via expression interpolation (PR context, dispatch inputs, reusable workflow inputs) |
 | FG-003  | Medium   | Tag-based action pinning (mutable references) |
 | FG-004  | Medium   | Overly broad workflow permissions |
 | FG-005  | Low      | Secrets exposed in workflow logs |
+| FG-006  | Medium   | Fork PR code execution via build hooks |
+| FG-007  | Medium   | Inconsistent GITHUB_TOKEN blanking |
+| FG-008  | Critical | OIDC misconfiguration on external triggers |
+| FG-009  | High     | Self-hosted runner on external triggers |
+| FG-010  | High     | Cache poisoning via shared cache on PR workflows |
+| FG-011  | Medium   | Bot actor guard TOCTOU bypass risk |
+
+### GitLab CI (GL-xxx)
+
+| Rule    | Severity | Description |
+|---------|----------|-------------|
+| GL-001  | High     | Merge request pipeline with privileged variables |
+| GL-002  | High     | Script injection via CI predefined variables |
+| GL-003  | Medium   | Unpinned include templates |
+
+### Azure Pipelines (AZ-xxx)
+
+| Rule    | Severity | Description |
+|---------|----------|-------------|
+| AZ-001  | High     | Fork PR builds with secret/variable group exposure |
+| AZ-002  | High     | Script injection via Azure predefined variables |
+| AZ-003  | Medium   | Unpinned template extends and repository resources |
+| AZ-009  | High     | Self-hosted agent pools on PR-triggered pipelines |
+
+**21 rules across 3 CI/CD platforms.**
 
 ## Why This Exists
 

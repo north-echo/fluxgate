@@ -1,0 +1,22 @@
+name: Deploy
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: string
+      branch:
+        description: 'Branch to deploy'
+        required: true
+        type: string
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy
+        run: |
+          echo "Deploying ${{ inputs.branch }} to ${{ inputs.environment }}"
+          ./deploy.sh ${{ github.event.inputs.environment }}
