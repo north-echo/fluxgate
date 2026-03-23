@@ -1,0 +1,13 @@
+include:
+  - remote: 'https://example.com/ci-templates/lint.yml'
+  - project: 'my-group/ci-templates'
+    file: '/templates/deploy.yml'
+
+stages:
+  - lint
+  - deploy
+
+lint:
+  stage: lint
+  script:
+    - eslint src/

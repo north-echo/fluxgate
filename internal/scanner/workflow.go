@@ -45,6 +45,7 @@ type Job struct {
 	Steps       []Step
 	Secrets     string   // "inherit" or empty
 	Needs       []string // job IDs this job depends on
+	RunsOn      []string // runner labels (e.g. ["ubuntu-latest"], ["self-hosted", "linux"])
 }
 
 // Step represents a single step in a job.
@@ -74,6 +75,7 @@ type rawJob struct {
 	Steps       []rawStep         `yaml:"steps"`
 	Secrets     string            `yaml:"secrets"`
 	Needs       yaml.Node         `yaml:"needs"`
+	RunsOn      yaml.Node         `yaml:"runs-on"`
 }
 
 type rawStep struct {
@@ -128,6 +130,7 @@ func ParseWorkflow(data []byte, path string) (*Workflow, error) {
 			Permissions: parsePermissions(&rawJ.Permissions),
 			Secrets:     rawJ.Secrets,
 			Needs:       parseNeeds(&rawJ.Needs),
+			RunsOn:      parseRunsOn(&rawJ.RunsOn),
 		}
 		for i, rawS := range rawJ.Steps {
 			step := Step{
@@ -314,6 +317,45 @@ func parseNeeds(node *yaml.Node) []string {
 			needs = append(needs, n.Value)
 		}
 		return needs
+	}
+	return nil
+}
+
+// parseRunsOn extracts runner labels from the runs-on: field.
+// Handles string ("runs-on: ubuntu-latest"), list ("runs-on: [self-hosted, linux]"),
+// and group ("runs-on: {group: ...}") forms.
+func parseRunsOn(node *yaml.Node) []string {
+	if node == nil || node.Kind == 0 {
+		return nil
+	}
+	switch node.Kind {
+	case yaml.ScalarNode:
+		if node.Value != "" {
+			return []string{node.Value}
+		}
+	case yaml.SequenceNode:
+		var labels []string
+		for _, n := range node.Content {
+			if n.Value != "" {
+				labels = append(labels, n.Value)
+			}
+		}
+		return labels
+	case yaml.MappingNode:
+		// Handle {group: ..., labels: [...]} form
+		// Prefer labels over group name when both are present
+		var group string
+		for i := 0; i < len(node.Content)-1; i += 2 {
+			if node.Content[i].Value == "labels" {
+				return parseRunsOn(node.Content[i+1])
+			}
+			if node.Content[i].Value == "group" {
+				group = node.Content[i+1].Value
+			}
+		}
+		if group != "" {
+			return []string{group}
+		}
 	}
 	return nil
 }
