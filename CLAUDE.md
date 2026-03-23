@@ -6,14 +6,15 @@ Fluxgate is a CI/CD pipeline security static analysis tool. It scans GitHub Acti
 
 ## Security Boundaries
 
-**READ [SECURITY-BOUNDARIES.md](SECURITY-BOUNDARIES.md) BEFORE EVERY COMMIT.**
+Before every push, ask: **"Does this commit contain anything that helps an attacker evade detection or identifies an unpatched target?"** If yes, do not push.
 
-Key constraints:
-- Never commit prompt files, BigQuery queries, scan databases, triage briefs, or real scan output to this public repo.
-- Never reference specific unpatched repos by name in commits or code.
-- Never embed disclosure tracking IDs (GHSA-*, VULN-*) in public code.
-- Test fixtures must be synthetic — never copy real workflow files from scanned repos.
-- **Before every push, ask: "Does this commit contain anything that helps an attacker evade detection or identifies an unpatched target?"**
+Never commit to this public repo:
+- Prompt files, BigQuery queries, scan databases, triage briefs, or real scan output
+- Specific unpatched repo names in commits, code, or documentation
+- Disclosure tracking IDs (GHSA-*, VULN-*, HackerOne report numbers)
+- SECURITY-BOUNDARIES.md or any file describing what we consider sensitive
+
+Test fixtures must be synthetic — never copy real workflow files from scanned repos. When in doubt, keep it private.
 
 ## Code Structure
 
