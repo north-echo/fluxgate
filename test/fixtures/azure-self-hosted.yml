@@ -1,0 +1,14 @@
+trigger:
+  - main
+
+pr:
+  - main
+
+jobs:
+  - job: Build
+    pool:
+      name: my-private-pool
+    steps:
+      - checkout: self
+      - script: make build
+        displayName: Build project

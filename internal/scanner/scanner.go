@@ -62,6 +62,17 @@ func ScanDirectory(dir string, opts ScanOptions) (*ScanResult, error) {
 		result.Findings = append(result.Findings, glFindings...)
 	}
 
+	// Scan Azure Pipelines if azure-pipelines.yml exists
+	for _, azName := range []string{"azure-pipelines.yml", "azure-pipelines.yaml"} {
+		azPath := filepath.Join(dir, azName)
+		if data, err := os.ReadFile(azPath); err == nil {
+			azFindings := ScanAzurePipelines(data, azPath, opts)
+			result.Workflows++
+			result.Findings = append(result.Findings, azFindings...)
+			break
+		}
+	}
+
 	if result.Workflows == 0 {
 		return nil, os.ErrNotExist
 	}
@@ -147,6 +158,62 @@ func ScanGitLabCI(data []byte, path string, opts ScanOptions) []Finding {
 			Line:     glf.Line,
 			Message:  glf.Message,
 			Details:  glf.Details,
+		}
+		findings = append(findings, f)
+	}
+
+	// Apply severity filter
+	if len(opts.Severities) > 0 {
+		sevSet := make(map[string]bool)
+		for _, s := range opts.Severities {
+			sevSet[strings.ToLower(s)] = true
+		}
+		var filtered []Finding
+		for _, f := range findings {
+			if sevSet[f.Severity] {
+				filtered = append(filtered, f)
+			}
+		}
+		findings = filtered
+	}
+
+	// Apply rule filter
+	if len(opts.Rules) > 0 {
+		ruleSet := make(map[string]bool)
+		for _, r := range opts.Rules {
+			ruleSet[r] = true
+		}
+		var filtered []Finding
+		for _, f := range findings {
+			if ruleSet[f.RuleID] {
+				filtered = append(filtered, f)
+			}
+		}
+		findings = filtered
+	}
+
+	return findings
+}
+
+// ScanAzurePipelines parses and scans an azure-pipelines.yml file, returning
+// findings in the common Finding format.
+func ScanAzurePipelines(data []byte, path string, opts ScanOptions) []Finding {
+	pipeline, err := cicd.ParseAzurePipeline(data, path)
+	if err != nil {
+		return nil
+	}
+
+	azFindings := cicd.ScanAzurePipeline(pipeline)
+
+	var findings []Finding
+	for _, azf := range azFindings {
+		f := Finding{
+			RuleID:   azf.RuleID,
+			Severity: azf.Severity,
+			File:     azf.File,
+			Line:     azf.Line,
+			Message:  azf.Message,
+			Details:  azf.Details,
 		}
 		findings = append(findings, f)
 	}
