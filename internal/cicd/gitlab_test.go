@@ -146,3 +146,39 @@ func TestGitLabIncludes_Parsed(t *testing.T) {
 		t.Errorf("expected project include, got %s", includes[1].Project)
 	}
 }
+
+// TestGitLabScriptInjection_MappingNode verifies GL-002 detects script injection
+// even when YAML parses unquoted script lines as mapping nodes (due to ": " in
+// the command, e.g. `echo "MR: $CI_MERGE_REQUEST_TITLE"`).
+func TestGitLabScriptInjection_MappingNode(t *testing.T) {
+	yamlContent := `
+stages:
+  - test
+
+check:
+  stage: test
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+  script:
+    - echo "Testing MR: $CI_MERGE_REQUEST_TITLE"
+    - pytest
+`
+	pipeline, err := ParseGitLabCI([]byte(yamlContent), "test.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	findings := ScanGitLabPipeline(pipeline)
+	var gl002 []GitLabFinding
+	for _, f := range findings {
+		if f.RuleID == "GL-002" {
+			gl002 = append(gl002, f)
+		}
+	}
+	if len(gl002) == 0 {
+		t.Fatal("expected GL-002 finding for $CI_MERGE_REQUEST_TITLE in script with mapping node")
+	}
+	if gl002[0].Severity != severityHigh {
+		t.Errorf("expected high severity, got %s", gl002[0].Severity)
+	}
+}
