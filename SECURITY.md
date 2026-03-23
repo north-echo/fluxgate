@@ -6,7 +6,7 @@ If you discover a security vulnerability in Fluxgate, please report it responsib
 
 ### Contact
 
-- **Email:** christopherdlusk@gmail.com
+- **Email:** clusk@northecho.dev
 - **GitHub Security Advisory:** Open a [GitHub Security Advisory](https://github.com/north-echo/fluxgate/security/advisories/new) on this repository.
 
 ### What to Include
