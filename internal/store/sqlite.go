@@ -46,10 +46,18 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("opening database: %w", err)
 	}
 
-	// Enable WAL mode for better concurrent access
+	// Serialize all access through a single connection to prevent SQLITE_BUSY
+	// under concurrent goroutine writes. WAL mode still helps with read perf.
+	db.SetMaxOpenConns(1)
+
 	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("setting WAL mode: %w", err)
+	}
+
+	if _, err := db.Exec("PRAGMA busy_timeout=30000"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("setting busy timeout: %w", err)
 	}
 
 	if _, err := db.Exec(schema); err != nil {
@@ -65,8 +73,69 @@ func Open(path string) (*DB, error) {
 
 // runMigrations applies incremental schema changes. Each is idempotent.
 func runMigrations(db *sqlx.DB) {
-	// Add source column if it doesn't exist
 	db.Exec(migration001AddSource)
+	db.Exec(migration002AddRepoLists)
+}
+
+// RepoListEntry holds a cached repo from a saved list.
+type RepoListEntry struct {
+	Owner    string `db:"owner"`
+	Name     string `db:"name"`
+	Stars    int    `db:"stars"`
+	Language string `db:"language"`
+}
+
+// SaveRepoList caches a fetched repo list under a query key (e.g. "top:5000").
+func (d *DB) SaveRepoList(query string, repos []RepoListEntry) error {
+	tx, err := d.db.Beginx()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("DELETE FROM repo_list_entries WHERE list_id IN (SELECT id FROM repo_lists WHERE query = ?)", query); err != nil {
+		return err
+	}
+	if _, err := tx.Exec("DELETE FROM repo_lists WHERE query = ?", query); err != nil {
+		return err
+	}
+
+	res, err := tx.Exec("INSERT INTO repo_lists (query) VALUES (?)", query)
+	if err != nil {
+		return err
+	}
+	listID, _ := res.LastInsertId()
+
+	for i, r := range repos {
+		_, err := tx.Exec(
+			"INSERT INTO repo_list_entries (list_id, owner, name, stars, language, position) VALUES (?, ?, ?, ?, ?, ?)",
+			listID, r.Owner, r.Name, r.Stars, r.Language, i,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+// LoadRepoList loads a cached repo list by query key. Returns nil if not found.
+func (d *DB) LoadRepoList(query string) ([]RepoListEntry, error) {
+	var entries []RepoListEntry
+	err := d.db.Select(&entries, `
+		SELECT e.owner, e.name, e.stars, e.language
+		FROM repo_list_entries e
+		JOIN repo_lists l ON l.id = e.list_id
+		WHERE l.query = ?
+		ORDER BY e.position
+	`, query)
+	if err != nil {
+		return nil, err
+	}
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	return entries, nil
 }
 
 // Close closes the database connection.

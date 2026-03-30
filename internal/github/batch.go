@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -32,14 +33,55 @@ type RepoInfo struct {
 }
 
 // FetchTopRepos returns the top N repos by star count from GitHub search API.
+// GitHub limits search results to 1,000 per query, so for N > 1000 we use
+// sliding star-count windows to paginate beyond the limit.
 func (c *Client) FetchTopRepos(ctx context.Context, top int) ([]RepoInfo, error) {
 	var repos []RepoInfo
+	seen := make(map[string]bool)
 	perPage := 100
 	if top < perPage {
 		perPage = top
 	}
 
-	for page := 1; len(repos) < top; page++ {
+	// Start with a broad query; narrow the star range when we hit the 1000-result ceiling
+	maxStars := 0 // 0 means no upper bound
+	minStars := 1000
+
+	for len(repos) < top {
+		query := fmt.Sprintf("stars:%d..%d", minStars, maxStars)
+		if maxStars == 0 {
+			query = fmt.Sprintf("stars:>%d", minStars)
+		}
+
+		windowRepos, lowestStars, err := c.fetchSearchWindow(ctx, query, perPage, top-len(repos), seen)
+		if err != nil {
+			return repos, err
+		}
+
+		repos = append(repos, windowRepos...)
+		fmt.Printf("  %d repos collected so far (stars >= %d)\n", len(repos), lowestStars)
+
+		if len(windowRepos) == 0 || lowestStars <= minStars {
+			break
+		}
+
+		// Slide the window: next query gets repos with fewer stars
+		maxStars = lowestStars
+	}
+
+	if len(repos) > top {
+		repos = repos[:top]
+	}
+	return repos, nil
+}
+
+// fetchSearchWindow fetches up to `limit` repos matching a star query, returning
+// the repos found, the lowest star count seen, and any error.
+func (c *Client) fetchSearchWindow(ctx context.Context, query string, perPage, limit int, seen map[string]bool) ([]RepoInfo, int, error) {
+	var repos []RepoInfo
+	lowestStars := math.MaxInt
+
+	for page := 1; len(repos) < limit && page <= 10; page++ {
 		searchOpts := &gh.SearchOptions{
 			Sort:  "stars",
 			Order: "desc",
@@ -50,31 +92,41 @@ func (c *Client) FetchTopRepos(ctx context.Context, top int) ([]RepoInfo, error)
 		}
 
 		result, err := withRetry(ctx, func(ctx context.Context) (*gh.RepositoriesSearchResult, *gh.Response, error) {
-			result, resp, err := c.gh.Search.Repositories(ctx, "stars:>1000", searchOpts)
-			return result, resp, err
+			return c.gh.Search.Repositories(ctx, query, searchOpts)
 		})
 		if err != nil {
-			return repos, fmt.Errorf("searching repos (page %d): %w", page, err)
+			return repos, lowestStars, fmt.Errorf("searching repos (query=%s page=%d): %w", query, page, err)
 		}
 
 		for _, r := range result.Repositories {
+			key := r.GetOwner().GetLogin() + "/" + r.GetName()
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+
+			stars := r.GetStargazersCount()
+			if stars < lowestStars {
+				lowestStars = stars
+			}
+
 			repos = append(repos, RepoInfo{
 				Owner:    r.GetOwner().GetLogin(),
 				Name:     r.GetName(),
-				Stars:    r.GetStargazersCount(),
+				Stars:    stars,
 				Language: r.GetLanguage(),
 			})
-			if len(repos) >= top {
+			if len(repos) >= limit {
 				break
 			}
 		}
 
 		if len(result.Repositories) < perPage {
-			break // no more results
+			break
 		}
 	}
 
-	return repos, nil
+	return repos, lowestStars, nil
 }
 
 // LoadRepoList reads repos from a file (one owner/repo per line).
