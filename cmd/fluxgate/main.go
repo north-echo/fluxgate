@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	gitclone "github.com/north-echo/fluxgate/internal/git"
 	ghclient "github.com/north-echo/fluxgate/internal/github"
 	"github.com/north-echo/fluxgate/internal/report"
 	"github.com/north-echo/fluxgate/internal/scanner"
@@ -162,15 +163,18 @@ func newRemoteCmd() *cobra.Command {
 
 func newBatchCmd() *cobra.Command {
 	var (
-		top        int
-		dbPath     string
-		list       string
-		resume     bool
-		delay      time.Duration
-		reportPath string
-		token      string
-		severities string
-		rules      string
+		top         int
+		dbPath      string
+		list        string
+		resume      bool
+		delay       time.Duration
+		reportPath  string
+		token       string
+		severities  string
+		rules       string
+		useClone    bool
+		concurrency int
+		keepDir     string
 	)
 
 	cmd := &cobra.Command{
@@ -197,6 +201,12 @@ func newBatchCmd() *cobra.Command {
 				token = os.Getenv("GITHUB_TOKEN")
 			}
 
+			if useClone {
+				if err := gitclone.CheckGit(); err != nil {
+					return err
+				}
+			}
+
 			client := ghclient.NewClient(token)
 			ctx := context.Background()
 
@@ -207,14 +217,45 @@ func newBatchCmd() *cobra.Command {
 					return fmt.Errorf("loading repo list: %w", err)
 				}
 			} else if top > 0 {
-				fmt.Printf("Fetching top %d repos by stars...\n", top)
-				repos, err = client.FetchTopRepos(ctx, top)
-				if err != nil {
-					return fmt.Errorf("fetching top repos: %w", err)
+				cacheKey := fmt.Sprintf("top:%d", top)
+				if resume {
+					cached, _ := db.LoadRepoList(cacheKey)
+					if cached != nil {
+						fmt.Printf("Loaded %d repos from cache\n\n", len(cached))
+						for _, c := range cached {
+							repos = append(repos, ghclient.RepoInfo{Owner: c.Owner, Name: c.Name, Stars: c.Stars, Language: c.Language})
+						}
+					}
 				}
-				fmt.Printf("Found %d repos\n\n", len(repos))
+				if len(repos) == 0 {
+					fmt.Printf("Fetching top %d repos by stars...\n", top)
+					repos, err = client.FetchTopRepos(ctx, top)
+					if err != nil {
+						return fmt.Errorf("fetching top repos: %w", err)
+					}
+					fmt.Printf("Found %d repos\n\n", len(repos))
+
+					entries := make([]store.RepoListEntry, len(repos))
+					for i, r := range repos {
+						entries[i] = store.RepoListEntry{Owner: r.Owner, Name: r.Name, Stars: r.Stars, Language: r.Language}
+					}
+					if saveErr := db.SaveRepoList(cacheKey, entries); saveErr != nil {
+						fmt.Fprintf(os.Stderr, "Warning: could not cache repo list: %v\n", saveErr)
+					}
+				}
 			} else {
 				return fmt.Errorf("specify --top N or --list file")
+			}
+
+			if useClone {
+				return batchScanWithClone(ctx, repos, cloneScanOptions{
+					DB:          db,
+					Token:       token,
+					ScanOpts:    parseScanOpts(severities, rules),
+					Resume:      resume,
+					Concurrency: concurrency,
+					KeepDir:     keepDir,
+				})
 			}
 
 			batchOpts := ghclient.BatchOptions{
@@ -248,23 +289,126 @@ func newBatchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&severities, "severity", "", "Filter by severity (comma-separated)")
 	cmd.Flags().StringVar(&rules, "rules", "", "Filter by rule ID (comma-separated)")
 	cmd.Flags().DurationVar(&delay, "delay", 0, "Delay between repos to avoid rate limits (e.g. 1s, 500ms)")
+	cmd.Flags().BoolVar(&useClone, "clone", false, "Use git sparse checkout instead of API (avoids rate limits)")
+	cmd.Flags().IntVar(&concurrency, "concurrency", 5, "Number of concurrent clone operations (used with --clone)")
+	cmd.Flags().StringVar(&keepDir, "keep", "", "Keep cloned repos in this directory instead of cleaning up")
 
 	return cmd
 }
 
+// cloneScanOptions groups parameters for clone-based batch scanning.
+type cloneScanOptions struct {
+	DB          *store.DB
+	Token       string
+	ScanOpts    scanner.ScanOptions
+	Resume      bool
+	Concurrency int
+	KeepDir     string
+}
+
+// batchScanWithClone scans repos by sparse-cloning them locally instead of
+// fetching workflows via the GitHub API. Each repo is cloned, scanned, and
+// cleaned up within a goroutine, bounding disk usage to O(concurrency).
+func batchScanWithClone(ctx context.Context, repos []ghclient.RepoInfo, copts cloneScanOptions) error {
+	var toScan []ghclient.RepoInfo
+	for _, repo := range repos {
+		if copts.Resume {
+			already, err := copts.DB.IsRepoScanned(repo.Owner, repo.Name)
+			if err != nil {
+				return fmt.Errorf("checking if %s/%s is scanned: %w", repo.Owner, repo.Name, err)
+			}
+			if already {
+				continue
+			}
+		}
+		toScan = append(toScan, repo)
+	}
+
+	if len(toScan) == 0 {
+		fmt.Println("All repos already scanned.")
+		return nil
+	}
+
+	if copts.KeepDir != "" {
+		fmt.Fprintf(os.Stderr, "Keeping clones in: %s\n", copts.KeepDir)
+		if err := os.MkdirAll(copts.KeepDir, 0o750); err != nil {
+			return fmt.Errorf("creating keep dir: %w", err)
+		}
+	}
+
+	repoInfo := make(map[string]ghclient.RepoInfo, len(toScan))
+	cloneRepos := make([]gitclone.Repo, len(toScan))
+	for i, r := range toScan {
+		cloneRepos[i] = gitclone.Repo{Owner: r.Owner, Name: r.Name}
+		repoInfo[r.Owner+"/"+r.Name] = r
+	}
+
+	fmt.Printf("Scanning %d repos via clone (concurrency: %d)...\n", len(toScan), copts.Concurrency)
+
+	results := gitclone.CloneAndScan(ctx, cloneRepos, copts.Concurrency, copts.Token, copts.KeepDir,
+		func(owner, name, dir string, cr *gitclone.CloneResult) error {
+			key := owner + "/" + name
+			info := repoInfo[key]
+
+			scanResult, err := scanner.ScanDirectory(dir, copts.ScanOpts)
+			if err != nil {
+				emptyResult := &scanner.ScanResult{Path: key}
+				if saveErr := copts.DB.SaveResult(owner, name, info.Stars, info.Language, emptyResult); saveErr != nil {
+					fmt.Fprintf(os.Stderr, "  Warning: could not save error state: %v\n", saveErr)
+				}
+				return err
+			}
+
+			cr.SetFindings(len(scanResult.Findings), scanResult.Workflows)
+			scanResult.Path = key
+			return copts.DB.SaveResult(owner, name, info.Stars, info.Language, scanResult)
+		})
+
+	scanned, withFindings := 0, 0
+	for i, cr := range results {
+		key := cr.Owner + "/" + cr.Name
+		info := repoInfo[key]
+
+		fmt.Printf("[%d/%d] %s", i+1, len(results), key)
+		if info.Stars > 0 {
+			fmt.Printf(" (%d stars)", info.Stars)
+		}
+
+		if cr.Err != nil {
+			fmt.Printf(" error: %v\n", cr.Err)
+			continue
+		}
+
+		scanned++
+		if cr.Findings > 0 {
+			withFindings++
+			fmt.Printf(" %d issues in %d workflows\n", cr.Findings, cr.Workflows)
+		} else {
+			fmt.Println(" clean")
+		}
+	}
+
+	fmt.Printf("\nBatch complete: %d scanned, %d with findings, %d skipped\n",
+		scanned, withFindings, len(repos)-len(toScan))
+	return nil
+}
+
 func newDiscoverCmd() *cobra.Command {
 	var (
-		trigger    string
-		minStars   int
-		maxPages   int
-		dbPath     string
-		delay      time.Duration
-		resume     bool
-		token      string
-		severities string
-		rules      string
-		listOnly   bool
-		output     string
+		trigger     string
+		minStars    int
+		maxPages    int
+		dbPath      string
+		delay       time.Duration
+		resume      bool
+		token       string
+		severities  string
+		rules       string
+		listOnly    bool
+		output      string
+		useClone    bool
+		concurrency int
+		keepDir     string
 	)
 
 	cmd := &cobra.Command{
@@ -275,6 +419,13 @@ func newDiscoverCmd() *cobra.Command {
 			if token == "" {
 				token = os.Getenv("GITHUB_TOKEN")
 			}
+
+			if useClone {
+				if err := gitclone.CheckGit(); err != nil {
+					return err
+				}
+			}
+
 			client := ghclient.NewClient(token)
 			ctx := context.Background()
 
@@ -312,6 +463,17 @@ func newDiscoverCmd() *cobra.Command {
 			}
 			defer db.Close()
 
+			if useClone {
+				return batchScanWithClone(ctx, repos, cloneScanOptions{
+					DB:          db,
+					Token:       token,
+					ScanOpts:    parseScanOpts(severities, rules),
+					Resume:      resume,
+					Concurrency: concurrency,
+					KeepDir:     keepDir,
+				})
+			}
+
 			batchOpts := ghclient.BatchOptions{
 				Resume: resume,
 				Delay:  delay,
@@ -334,6 +496,9 @@ func newDiscoverCmd() *cobra.Command {
 	cmd.Flags().StringVar(&rules, "rules", "", "Filter by rule ID (comma-separated)")
 	cmd.Flags().BoolVar(&listOnly, "list-only", false, "Output repo list without scanning")
 	cmd.Flags().StringVarP(&output, "output", "o", "", "Output file for --list-only (default: stdout)")
+	cmd.Flags().BoolVar(&useClone, "clone", false, "Use git sparse checkout instead of API (avoids rate limits)")
+	cmd.Flags().IntVar(&concurrency, "concurrency", 5, "Number of concurrent clone operations (used with --clone)")
+	cmd.Flags().StringVar(&keepDir, "keep", "", "Keep cloned repos in this directory instead of cleaning up")
 
 	return cmd
 }
