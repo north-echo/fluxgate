@@ -77,3 +77,23 @@ CREATE TABLE IF NOT EXISTS patches (
 
 CREATE INDEX IF NOT EXISTS idx_patches_disclosure ON patches(disclosure_id);
 `
+
+const migration005AddRepoLists = `
+CREATE TABLE IF NOT EXISTS repo_lists (
+    id INTEGER PRIMARY KEY,
+    query TEXT NOT NULL UNIQUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS repo_list_entries (
+    id INTEGER PRIMARY KEY,
+    list_id INTEGER REFERENCES repo_lists(id),
+    owner TEXT NOT NULL,
+    name TEXT NOT NULL,
+    stars INTEGER,
+    language TEXT,
+    position INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_repo_list_entries_list ON repo_list_entries(list_id, position);
+`
