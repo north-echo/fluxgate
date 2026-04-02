@@ -773,7 +773,7 @@ func newDisclosureAddCmd() *cobra.Command {
 	}
 	cmd.Flags().Int64Var(&findingID, "finding-id", 0, "Finding ID to disclose")
 	cmd.Flags().StringVar(&channel, "channel", "", "Disclosure channel (GHSA, HackerOne, email, vendor-portal)")
-	cmd.Flags().StringVar(&disclosureID, "id", "", "External disclosure ID (e.g., GHSA-xxxx)")
+	cmd.Flags().StringVar(&disclosureID, "id", "", "External disclosure ID")
 	cmd.Flags().StringVar(&dbPath, "db", "findings.db", "Database path")
 	cmd.MarkFlagRequired("finding-id")
 	cmd.MarkFlagRequired("channel")
