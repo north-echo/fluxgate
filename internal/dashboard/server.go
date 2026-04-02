@@ -88,6 +88,7 @@ func NewMulti(dbs []DBEntry) *Server {
 	// Register routes
 	s.mux.HandleFunc("GET /", s.overviewHandler)
 	s.mux.HandleFunc("GET /findings", s.findingsHandler)
+	s.mux.HandleFunc("GET /findings/export.csv", s.findingsExportHandler)
 	s.mux.HandleFunc("GET /repos/{owner}/{name}", s.repoHandler)
 	s.mux.HandleFunc("GET /disclosures", s.disclosuresHandler)
 	s.mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticSub))))

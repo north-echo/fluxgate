@@ -1,6 +1,8 @@
 package dashboard
 
 import (
+	"encoding/csv"
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -152,6 +154,36 @@ func (s *Server) repoHandler(w http.ResponseWriter, r *http.Request) {
 
 	data := repoData{Detail: detail}
 	s.renderPage(w, r, "repo", data)
+}
+
+// findingsExportHandler exports all findings (with current filters) as CSV.
+func (s *Server) findingsExportHandler(w http.ResponseWriter, r *http.Request) {
+	db, _ := s.activeDB(r)
+
+	severity := r.URL.Query().Get("severity")
+	rule := r.URL.Query().Get("rule")
+	owner := r.URL.Query().Get("owner")
+
+	// Fetch all matching findings (no pagination)
+	findings, _, err := db.ListFindings(0, 1000000, severity, rule, owner)
+	if err != nil {
+		http.Error(w, "failed to export findings: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/csv")
+	w.Header().Set("Content-Disposition", "attachment; filename=fluxgate-findings.csv")
+
+	cw := csv.NewWriter(w)
+	cw.Write([]string{"Severity", "Rule", "Owner", "Repo", "Workflow", "Line", "Description", "Details"})
+	for _, f := range findings {
+		cw.Write([]string{
+			f.Severity, f.RuleID, f.Owner, f.RepoName,
+			f.WorkflowPath, fmt.Sprintf("%d", f.LineNumber),
+			f.Description, f.Details,
+		})
+	}
+	cw.Flush()
 }
 
 // disclosuresHandler renders the disclosure tracking table.

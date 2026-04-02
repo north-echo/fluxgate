@@ -23,6 +23,7 @@
             <input type="text" name="owner" value="{{.Owner}}" placeholder="e.g. acme-corp" onchange="this.form.requestSubmit()">
         </label>
     </form>
+    <a href="/findings/export.csv?severity={{.Severity}}&rule={{.Rule}}&owner={{.Owner}}" class="btn btn-export">Export CSV</a>
 </div>
 
 <div id="findings-table">

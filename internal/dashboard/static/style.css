@@ -86,6 +86,36 @@ nav a:hover {
     border-color: #c00;
 }
 
+/* Buttons */
+.btn {
+    display: inline-block;
+    padding: 0.4rem 1rem;
+    border-radius: 4px;
+    font-size: 0.85rem;
+    text-decoration: none;
+    cursor: pointer;
+    border: 1px solid #ccc;
+    background: #fff;
+    color: #333;
+    transition: all 0.15s;
+}
+
+.btn:hover {
+    background: #f0f0f0;
+    border-color: #999;
+}
+
+.btn-export {
+    background: #2d2d2d;
+    color: #fff;
+    border-color: #2d2d2d;
+    margin-left: auto;
+}
+
+.btn-export:hover {
+    background: #444;
+}
+
 /* Stats cards */
 .stats-cards {
     display: flex;
