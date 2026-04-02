@@ -1,0 +1,36 @@
+{{define "content"}}
+<h1>Disclosures</h1>
+
+<table>
+    <thead>
+        <tr>
+            <th>ID</th>
+            <th>Channel</th>
+            <th>Repo</th>
+            <th>Rule</th>
+            <th>Severity</th>
+            <th>Status</th>
+            <th>Filed</th>
+            <th>Disclosure ID</th>
+        </tr>
+    </thead>
+    <tbody>
+        {{range .Disclosures}}
+        <tr>
+            <td>{{.ID}}</td>
+            <td>{{.Channel}}</td>
+            <td><a href="/repos/{{.Owner}}/{{.RepoName}}">{{.Owner}}/{{.RepoName}}</a></td>
+            <td>{{.RuleID}}</td>
+            <td><span class="badge severity-{{.Severity}}">{{.Severity}}</span></td>
+            <td><span class="badge status-{{.Status}}">{{.Status}}</span></td>
+            <td>{{.FiledAt}}</td>
+            <td>{{.DisclosureID}}</td>
+        </tr>
+        {{else}}
+        <tr>
+            <td colspan="8">No disclosures recorded yet.</td>
+        </tr>
+        {{end}}
+    </tbody>
+</table>
+{{end}}

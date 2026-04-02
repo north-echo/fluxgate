@@ -1,0 +1,42 @@
+{{define "findings-table"}}
+<table>
+    <thead>
+        <tr>
+            <th>Severity</th>
+            <th>Rule</th>
+            <th>Repo</th>
+            <th>Workflow</th>
+            <th>Line</th>
+            <th>Description</th>
+        </tr>
+    </thead>
+    <tbody>
+        {{range .Findings}}
+        <tr>
+            <td><span class="badge severity-{{.Severity}}">{{.Severity}}</span></td>
+            <td>{{.RuleID}}</td>
+            <td><a href="/repos/{{.Owner}}/{{.RepoName}}">{{.Owner}}/{{.RepoName}}</a></td>
+            <td>{{.WorkflowPath}}</td>
+            <td>{{.LineNumber}}</td>
+            <td>{{.Description}}</td>
+        </tr>
+        {{else}}
+        <tr>
+            <td colspan="6">No findings match the current filters.</td>
+        </tr>
+        {{end}}
+    </tbody>
+</table>
+
+{{if .HasMore}}
+<div class="pagination">
+    <button
+        hx-get="/findings?page={{.NextPage}}&severity={{.Severity}}&rule={{.Rule}}&owner={{.Owner}}"
+        hx-target="#findings-table"
+        hx-swap="innerHTML"
+        class="btn">
+        Load more (page {{.NextPage}})
+    </button>
+</div>
+{{end}}
+{{end}}

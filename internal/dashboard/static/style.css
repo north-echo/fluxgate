@@ -1,0 +1,291 @@
+/* Fluxgate Dashboard — Minimal Styles */
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.6;
+    color: #1a1a1a;
+    background: #fafafa;
+}
+
+.container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 0 1rem;
+}
+
+/* Navigation */
+header {
+    background: #1a1a1a;
+    color: #fff;
+    padding: 0.75rem 1rem;
+    margin-bottom: 2rem;
+}
+
+nav {
+    max-width: 1200px;
+    margin: 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 2rem;
+}
+
+.nav-brand {
+    font-weight: 700;
+    font-size: 1.25rem;
+    letter-spacing: -0.02em;
+}
+
+nav ul {
+    list-style: none;
+    display: flex;
+    gap: 1.5rem;
+}
+
+nav a {
+    color: #ccc;
+    text-decoration: none;
+}
+
+nav a:hover {
+    color: #fff;
+}
+
+/* DB Switcher */
+.db-switcher {
+    margin-left: auto;
+    display: flex;
+    gap: 0.5rem;
+}
+
+.db-pill {
+    display: inline-block;
+    padding: 0.25rem 0.75rem;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    text-decoration: none;
+    color: #ccc;
+    background: #333;
+    border: 1px solid #555;
+    transition: all 0.15s;
+}
+
+.db-pill:hover {
+    color: #fff;
+    border-color: #888;
+}
+
+.db-pill.active {
+    color: #fff;
+    background: #c00;
+    border-color: #c00;
+}
+
+/* Stats cards */
+.stats-cards {
+    display: flex;
+    gap: 1rem;
+    flex-wrap: wrap;
+    margin-bottom: 2rem;
+}
+
+.card {
+    background: #fff;
+    border: 1px solid #e0e0e0;
+    border-radius: 6px;
+    padding: 1rem 1.5rem;
+    min-width: 140px;
+    text-align: center;
+}
+
+.card-value {
+    font-size: 1.75rem;
+    font-weight: 700;
+}
+
+.card-label {
+    font-size: 0.85rem;
+    color: #666;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+/* Tables */
+table {
+    width: 100%;
+    border-collapse: collapse;
+    background: #fff;
+    margin-bottom: 2rem;
+}
+
+th, td {
+    padding: 0.5rem 0.75rem;
+    text-align: left;
+    border-bottom: 1px solid #e0e0e0;
+}
+
+th {
+    background: #f5f5f5;
+    font-weight: 600;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+tbody tr:nth-child(even) {
+    background: #fafafa;
+}
+
+tbody tr:hover {
+    background: #f0f0f0;
+}
+
+/* Severity badges */
+.badge {
+    display: inline-block;
+    padding: 0.15rem 0.5rem;
+    border-radius: 3px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.severity-critical { background: #dc2626; color: #fff; }
+.severity-high     { background: #ea580c; color: #fff; }
+.severity-medium   { background: #eab308; color: #1a1a1a; }
+.severity-low      { background: #2563eb; color: #fff; }
+.severity-info     { background: #9ca3af; color: #fff; }
+
+/* Status badges */
+.status-filed        { background: #2563eb; color: #fff; }
+.status-acknowledged { background: #eab308; color: #1a1a1a; }
+.status-patched      { background: #16a34a; color: #fff; }
+.status-wontfix      { background: #9ca3af; color: #fff; }
+.status-timeout      { background: #dc2626; color: #fff; }
+
+/* Heatmap */
+.heatmap-cell {
+    text-align: center;
+    font-weight: 600;
+}
+
+.heatmap-cell[data-count="0"] {
+    color: #ccc;
+}
+
+.heatmap-cell[data-severity="critical"]:not([data-count="0"]) {
+    background: rgba(220, 38, 38, 0.15);
+    color: #dc2626;
+}
+
+.heatmap-cell[data-severity="high"]:not([data-count="0"]) {
+    background: rgba(234, 88, 12, 0.15);
+    color: #ea580c;
+}
+
+.heatmap-cell[data-severity="medium"]:not([data-count="0"]) {
+    background: rgba(234, 179, 8, 0.15);
+    color: #a16207;
+}
+
+.heatmap-cell[data-severity="low"]:not([data-count="0"]) {
+    background: rgba(37, 99, 235, 0.15);
+    color: #2563eb;
+}
+
+.heatmap-cell[data-severity="info"]:not([data-count="0"]) {
+    background: rgba(156, 163, 175, 0.15);
+    color: #6b7280;
+}
+
+/* Filters */
+.filters {
+    margin-bottom: 1.5rem;
+}
+
+.filters form {
+    display: flex;
+    gap: 1rem;
+    flex-wrap: wrap;
+    align-items: end;
+}
+
+.filters label {
+    display: flex;
+    flex-direction: column;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #666;
+}
+
+.filters select,
+.filters input {
+    padding: 0.4rem 0.6rem;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 0.9rem;
+}
+
+/* Buttons */
+.btn {
+    padding: 0.5rem 1.25rem;
+    background: #1a1a1a;
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.9rem;
+}
+
+.btn:hover {
+    background: #333;
+}
+
+/* Pagination */
+.pagination {
+    text-align: center;
+    margin: 1rem 0;
+}
+
+/* Footer */
+footer {
+    margin-top: 3rem;
+    padding: 1rem 0;
+    border-top: 1px solid #e0e0e0;
+    color: #999;
+    font-size: 0.85rem;
+    text-align: center;
+}
+
+/* Links */
+a {
+    color: #2563eb;
+    text-decoration: none;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+/* Headings */
+h1, h2 {
+    margin-bottom: 1rem;
+}
+
+h1 small {
+    font-size: 0.5em;
+    color: #999;
+    font-weight: 400;
+}
+
+code {
+    font-size: 0.85rem;
+    background: #f0f0f0;
+    padding: 0.1rem 0.3rem;
+    border-radius: 3px;
+}

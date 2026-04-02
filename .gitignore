@@ -32,3 +32,6 @@ SECURITY-BOUNDARIES.md
 # Test artifacts
 test-report.md
 test-repos.txt
+
+# Research station (contains sensitive queries, prompts, configs)
+research-station/

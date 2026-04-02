@@ -1,0 +1,56 @@
+{{define "content"}}
+<h1>{{.Detail.Repo.Owner}}/{{.Detail.Repo.Name}}</h1>
+
+<div class="stats-cards">
+    <div class="card">
+        <div class="card-value">{{.Detail.Repo.Stars}}</div>
+        <div class="card-label">Stars</div>
+    </div>
+    <div class="card">
+        <div class="card-value">{{.Detail.Repo.Language}}</div>
+        <div class="card-label">Language</div>
+    </div>
+    <div class="card">
+        <div class="card-value">{{.Detail.Repo.WorkflowsCount}}</div>
+        <div class="card-label">Workflows</div>
+    </div>
+    <div class="card">
+        <div class="card-value">{{.Detail.Repo.FindingsCount}}</div>
+        <div class="card-label">Findings</div>
+    </div>
+    <div class="card">
+        <div class="card-value">{{.Detail.Repo.ScannedAt}}</div>
+        <div class="card-label">Scanned</div>
+    </div>
+</div>
+
+<h2>Findings</h2>
+<table>
+    <thead>
+        <tr>
+            <th>Severity</th>
+            <th>Rule</th>
+            <th>Workflow</th>
+            <th>Line</th>
+            <th>Description</th>
+            <th>Details</th>
+        </tr>
+    </thead>
+    <tbody>
+        {{range .Detail.Findings}}
+        <tr>
+            <td><span class="badge severity-{{.Severity}}">{{.Severity}}</span></td>
+            <td>{{.RuleID}}</td>
+            <td>{{.WorkflowPath}}</td>
+            <td>{{.LineNumber}}</td>
+            <td>{{.Description}}</td>
+            <td><code>{{.Details}}</code></td>
+        </tr>
+        {{else}}
+        <tr>
+            <td colspan="6">No findings for this repository.</td>
+        </tr>
+        {{end}}
+    </tbody>
+</table>
+{{end}}

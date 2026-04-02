@@ -1,0 +1,16 @@
+name: Test Fork PR
+on:
+  pull_request_target:
+    types: [labeled]
+jobs:
+  test:
+    if: github.event.label.name == 'ready-to-merge'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          git fetch origin pull/${{ github.event.number }}/head:pr-head
+          git merge pr-head
+      - run: pip install -e ".[dev,test]"
+        env:
+          API_KEY: ${{ secrets.API_KEY }}

@@ -56,10 +56,12 @@ type MitigationAnalysis struct {
 	ForkGuard        bool
 	ActorGuard       bool // Job if: restricts execution to specific bot actor(s)
 	ActorGuardHuman  bool // Job if: restricts to specific human actor(s) (weaker)
-	NeedsGate        bool // Job depends on upstream job with environment/fork gate
-	TokenBlanked     bool
-	PathIsolated     bool // Fork code checked out to subdirectory, no direct execution
-	Details          []string
+	NeedsGate          bool // Job depends on upstream job with environment/fork gate
+	TokenBlanked       bool
+	PathIsolated       bool // Fork code checked out to subdirectory, no direct execution
+	TrustedRefIsolated bool // Fork checkout to subdir, all executed code from trusted ref
+	PermissionGateJob  bool // Upstream job verifies collaborator permissions via API
+	Details            []string
 }
 
 // Build tools that definitely execute code from the working directory.
@@ -67,7 +69,7 @@ var confirmedBuildCommands = []string{
 	"npm install", "npm ci", "npm run", "npm test", "npm start",
 	"yarn install", "yarn run", "yarn test", "yarn build",
 	"pnpm install", "pnpm run", "pnpm test",
-	"pip install", "poetry install",
+	"poetry install",
 	"bundle install", "bundle exec",
 	"cargo build", "cargo test", "cargo run",
 	"go build", "go test", "go run",
@@ -93,6 +95,18 @@ var buildActions = []string{
 	"bahmutov/npm-install",
 }
 
+// Formatting/linting tools with declarative-only config (no code execution surface).
+// These process checked-out code but don't execute it.
+var safeFormattingTools = []string{
+	"black", "autopep8", "yapf", "isort", "pyink",
+	"gofmt", "goimports", "gofumpt",
+	"rustfmt",
+	"clang-format",
+	"shfmt",
+	"prettier",   // config is JSON/YAML-only, no plugin execution
+	"markdownlint",
+}
+
 // Read-only commands that don't execute checked-out code.
 var readOnlyCommands = []string{
 	"diff", "cmp", "cat", "grep", "head", "tail", "wc",
@@ -111,6 +125,12 @@ func CheckPwnRequest(wf *Workflow) []Finding {
 
 	var findings []Finding
 	for _, job := range wf.Jobs {
+		// Skip jobs scoped to pull_request only — they never run in
+		// pull_request_target context, so no privileged secret access.
+		if jobScopedToPullRequest(job.If) {
+			continue
+		}
+
 		checkoutIdx := -1
 		checkoutLine := 0
 		checkoutRef := ""
@@ -123,6 +143,18 @@ func CheckPwnRequest(wf *Workflow) []Finding {
 				checkoutRef = step.With["ref"]
 				checkoutPath = step.With["path"]
 				break
+			}
+		}
+
+		// Check for git-based PR checkout in run blocks
+		if checkoutIdx == -1 {
+			for i, step := range job.Steps {
+				if step.Run != "" && runFetchesPRHead(step.Run) {
+					checkoutIdx = i
+					checkoutLine = step.Line
+					checkoutRef = "git fetch (PR head)"
+					break
+				}
 			}
 		}
 
@@ -164,6 +196,19 @@ func CheckPwnRequest(wf *Workflow) []Finding {
 			mitigated = true
 		} else if mitigation.LabelGated || mitigation.EnvironmentGated || mitigation.MaintainerCheck || mitigation.ActorGuardHuman {
 			severity = downgradeBy(severity, 1)
+			mitigated = true
+		}
+
+		// Trusted-ref isolation: fork code in subdir, all execution from trusted ref — suppress
+		if mitigation.TrustedRefIsolated {
+			severity = SeverityInfo
+			confidence = ConfidencePatternOnly
+			mitigated = true
+		}
+
+		// Permission gate job: upstream job verifies collaborator access — internal threat only
+		if mitigation.PermissionGateJob && !mitigated {
+			severity = downgradeBy(severity, 2)
 			mitigated = true
 		}
 
@@ -243,7 +288,7 @@ func analyzePostCheckoutExecution(steps []Step) ExecutionAnalysis {
 				}
 			}
 			// If there's a setup action and a run block, it likely executes repo code
-			if hasSetupAction && !isReadOnlyRun(step.Run) {
+			if hasSetupAction && !isReadOnlyRun(step.Run) && !isPipNamedPackageOnly(step.Run) && !isSafeFormattingRun(step.Run) {
 				return ExecutionAnalysis{
 					Likely: true,
 					Detail: fmt.Sprintf("run block after setup action may execute repo code (line %d)", step.Line),
@@ -286,6 +331,148 @@ func splitShellCommands(line string) []string {
 	return segments
 }
 
+// classifyPipInstall analyzes a pip install command and returns
+// whether it installs attacker-controlled code from the checkout.
+func classifyPipInstall(args string) (confirmed bool, detail string) {
+	args = strings.TrimSpace(args)
+
+	// No args = reads from pyproject.toml/setup.cfg in checkout
+	if args == "" {
+		return true, "pip install with no target (reads project config)"
+	}
+
+	// Requirements file install — attacker can modify in PR
+	if strings.HasPrefix(args, "-r ") || strings.HasPrefix(args, "--requirement ") {
+		return true, "pip install from requirements file (attacker can modify in PR)"
+	}
+
+	// Strip leading flags (--upgrade, --no-deps, etc.) to find the install target
+	target := stripPipFlags(args)
+
+	// Local path installs
+	if target == "." || target == "./" ||
+		strings.HasPrefix(target, "./") || strings.HasPrefix(target, "../") {
+		return true, fmt.Sprintf("pip install from local path '%s'", target)
+	}
+	// Editable installs: -e . or -e ./path or -e ".[dev]"
+	if strings.HasPrefix(args, "-e ") {
+		eTarget := strings.TrimSpace(strings.TrimPrefix(args, "-e "))
+		eTarget = stripPipFlags(eTarget)
+		eUnquoted := strings.Trim(eTarget, "\"'")
+		if eUnquoted == "." || eUnquoted == "./" ||
+			strings.HasPrefix(eUnquoted, "./") || strings.HasPrefix(eUnquoted, "../") ||
+			strings.HasPrefix(eUnquoted, ".[") {
+			return true, fmt.Sprintf("pip install editable from local path '%s'", eUnquoted)
+		}
+		// -e with a non-local target (e.g., -e git+https://...)
+		return false, fmt.Sprintf("pip install editable '%s'", eTarget)
+	}
+
+	// Extras on local path: ".[dev]", ".[dev,test]"
+	if strings.HasPrefix(target, ".[") || strings.HasPrefix(target, "./[") {
+		return true, fmt.Sprintf("pip install from local path with extras '%s'", target)
+	}
+	// Quoted variants: ".[dev]"
+	unquoted := strings.Trim(target, "\"'")
+	if strings.HasPrefix(unquoted, ".[") || unquoted == "." {
+		return true, fmt.Sprintf("pip install from local path '%s'", unquoted)
+	}
+
+	// Named package from PyPI = not directly exploitable
+	return false, fmt.Sprintf("pip install of named package '%s' (PyPI supply chain risk only)", target)
+}
+
+// stripPipFlags removes common pip install flags to find the actual target.
+func stripPipFlags(args string) string {
+	parts := strings.Fields(args)
+	var result []string
+	skip := false
+	for _, p := range parts {
+		if skip {
+			skip = false
+			continue
+		}
+		// Flags that take a value argument
+		if p == "--target" || p == "--prefix" || p == "--root" ||
+			p == "--index-url" || p == "-i" || p == "--extra-index-url" ||
+			p == "--constraint" || p == "-c" || p == "--find-links" || p == "-f" {
+			skip = true
+			continue
+		}
+		// Boolean flags
+		if strings.HasPrefix(p, "--") || (strings.HasPrefix(p, "-") && len(p) == 2 && p != "-e" && p != "-r") {
+			continue
+		}
+		result = append(result, p)
+	}
+	return strings.Join(result, " ")
+}
+
+// isSafeFormattingRun checks if a run block only invokes safe formatting tools
+// that process code but don't execute it.
+func isSafeFormattingRun(run string) bool {
+	lines := strings.Split(run, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		segments := splitShellCommands(line)
+		for _, seg := range segments {
+			seg = strings.TrimSpace(seg)
+			if seg == "" {
+				continue
+			}
+			isSafe := false
+			for _, tool := range safeFormattingTools {
+				if strings.HasPrefix(seg, tool+" ") || seg == tool {
+					isSafe = true
+					break
+				}
+			}
+			if !isSafe {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// isPipNamedPackageOnly checks if a run block only contains pip install
+// of named packages (not local paths or requirements files).
+func isPipNamedPackageOnly(run string) bool {
+	lines := strings.Split(run, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		segments := splitShellCommands(line)
+		for _, seg := range segments {
+			seg = strings.TrimSpace(seg)
+			if seg == "" {
+				continue
+			}
+			isPipInstall := false
+			for _, prefix := range []string{"pip install", "pip3 install"} {
+				if strings.HasPrefix(seg, prefix+" ") || seg == prefix {
+					pipArgs := strings.TrimPrefix(seg, prefix)
+					confirmed, _ := classifyPipInstall(pipArgs)
+					if confirmed {
+						return false // local install = executing checkout code
+					}
+					isPipInstall = true
+					break
+				}
+			}
+			if !isPipInstall {
+				return false // non-pip command present
+			}
+		}
+	}
+	return true
+}
+
 // matchesBuildCommand checks if a run block contains a known build command.
 func matchesBuildCommand(run string) (string, bool) {
 	lines := strings.Split(run, "\n")
@@ -297,6 +484,19 @@ func matchesBuildCommand(run string) (string, bool) {
 		segments := splitShellCommands(line)
 		for _, seg := range segments {
 			seg = strings.TrimSpace(seg)
+
+			// Special handling for pip install — classify by argument
+			for _, prefix := range []string{"pip install", "pip3 install"} {
+				if strings.HasPrefix(seg, prefix+" ") || seg == prefix {
+					pipArgs := strings.TrimPrefix(seg, prefix)
+					confirmed, _ := classifyPipInstall(pipArgs)
+					if confirmed {
+						return seg, true
+					}
+					goto nextSeg // named package install, skip
+				}
+			}
+
 			for _, cmd := range confirmedBuildCommands {
 				if strings.HasPrefix(seg, cmd+" ") || seg == cmd {
 					return cmd, true
@@ -306,6 +506,7 @@ func matchesBuildCommand(run string) (string, bool) {
 			if strings.HasPrefix(seg, "./") {
 				return seg, true
 			}
+		nextSeg:
 		}
 	}
 	return "", false
@@ -759,6 +960,43 @@ func analyzeMitigations(wf *Workflow, job Job, checkoutIdx int, postCheckoutStep
 		}
 	}
 
+	// 8. Check trusted-ref isolation — fork checkout to subdir + separate trusted ref checkout
+	// Pattern: one checkout uses a fixed ref (main/master), another uses head.sha to a different path,
+	// and all run blocks reference scripts from the trusted checkout, not the fork directory.
+	if checkoutPath != "" && m.PathIsolated {
+		hasTrustedRef := false
+		for _, step := range job.Steps {
+			if isCheckoutAction(step.Uses) {
+				ref := step.With["ref"]
+				path := step.With["path"]
+				// If this checkout uses a fixed trusted ref and a different path than the fork checkout
+				if isTrustedRef(ref) && path != checkoutPath {
+					hasTrustedRef = true
+					break
+				}
+			}
+		}
+		if hasTrustedRef {
+			m.TrustedRefIsolated = true
+			m.Details = append(m.Details, "trusted-ref isolation: fork code in subdirectory, executed scripts from trusted ref checkout")
+		}
+	}
+
+	// 9. Check permission gate job — upstream job verifies collaborator permission level
+	// Pattern: needs: [check-permissions] where that job uses getCollaboratorPermissionLevel
+	// or similar permission verification, and this job's if: references its output.
+	for _, depName := range job.Needs {
+		if dep, ok := wf.Jobs[depName]; ok {
+			if hasPermissionCheck(dep) {
+				m.PermissionGateJob = true
+				m.NeedsGate = true
+				m.Details = append(m.Details, fmt.Sprintf(
+					"depends on job '%s' which verifies collaborator permissions (internal-only gate)", depName))
+				break
+			}
+		}
+	}
+
 	return m
 }
 
@@ -998,6 +1236,57 @@ func isTokenBlanked(step Step) bool {
 	return false
 }
 
+// isTrustedRef checks if a checkout ref is a fixed trusted branch (not PR head).
+func isTrustedRef(ref string) bool {
+	if ref == "" {
+		return true // Default checkout (base ref) is trusted
+	}
+	trusted := []string{
+		"refs/heads/main", "refs/heads/master", "main", "master",
+		"${{ github.base_ref }}", "${{ github.event.repository.default_branch }}",
+	}
+	lower := strings.ToLower(ref)
+	for _, t := range trusted {
+		if lower == strings.ToLower(t) {
+			return true
+		}
+	}
+	// Environment variable references to trusted refs
+	if strings.Contains(lower, "trusted") || strings.Contains(lower, "base_ref") {
+		return true
+	}
+	return false
+}
+
+// hasPermissionCheck detects if a job verifies collaborator permissions via GitHub API.
+// Pattern: uses actions/github-script with getCollaboratorPermissionLevel or similar.
+func hasPermissionCheck(job Job) bool {
+	permPatterns := []string{
+		"getCollaboratorPermissionLevel",
+		"collaborator-permission",
+		"check-permissions",
+		"permission-level",
+		"has-access",
+		"author_association",
+	}
+	for _, step := range job.Steps {
+		target := step.Run
+		if step.Uses != "" {
+			// Check action inputs for permission verification patterns
+			for _, v := range step.With {
+				target += " " + v
+			}
+		}
+		lower := strings.ToLower(target)
+		for _, p := range permPatterns {
+			if strings.Contains(lower, strings.ToLower(p)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // checkoutsForkCode checks if a checkout step checks out fork code.
 // For pull_request trigger, default checkout (no ref) checks out the merge commit
 // which includes fork code.
@@ -1054,6 +1343,58 @@ func refPointsToPRHead(ref string) bool {
 	}
 	for _, d := range dangerous {
 		if strings.Contains(ref, d) {
+			return true
+		}
+	}
+	return false
+}
+
+// jobScopedToPullRequest checks if a job's if: condition restricts it
+// to only run on pull_request events (not pull_request_target).
+func jobScopedToPullRequest(ifCondition string) bool {
+	if ifCondition == "" {
+		return false
+	}
+	normalized := strings.ReplaceAll(ifCondition, " ", "")
+	normalized = strings.ReplaceAll(normalized, "\u2018", "'")
+	normalized = strings.ReplaceAll(normalized, "\u2019", "'")
+	normalized = strings.ReplaceAll(normalized, "\"", "'")
+
+	// Positive match: only runs on pull_request
+	if strings.Contains(normalized, "github.event_name=='pull_request'") {
+		// Make sure it's not checking for pull_request_target
+		if !strings.Contains(normalized, "pull_request_target") {
+			return true
+		}
+	}
+
+	// Negative match: explicitly excludes pull_request_target
+	if strings.Contains(normalized, "github.event_name!='pull_request_target'") {
+		return true
+	}
+
+	return false
+}
+
+// runFetchesPRHead checks if a run block fetches PR content into the
+// working directory via git commands (alternative to actions/checkout ref).
+func runFetchesPRHead(run string) bool {
+	lines := strings.Split(run, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		// git fetch origin pull/<number>/head or git fetch origin <PR SHA>
+		if strings.Contains(line, "git fetch") &&
+			(strings.Contains(line, "pull/") && strings.Contains(line, "/head") ||
+				strings.Contains(line, "github.event.number") ||
+				strings.Contains(line, "github.event.pull_request.number") ||
+				strings.Contains(line, "github.event.pull_request.head.sha")) {
+			return true
+		}
+		// gh pr checkout
+		if strings.Contains(line, "gh pr checkout") {
 			return true
 		}
 	}

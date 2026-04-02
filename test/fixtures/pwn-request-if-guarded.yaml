@@ -1,0 +1,15 @@
+name: Dual Trigger
+on:
+  pull_request:
+  pull_request_target:
+    types: [opened, synchronize]
+jobs:
+  safe-format:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+      - run: pip install -e ".[dev]"
+      - run: black --check .

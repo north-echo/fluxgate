@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Fluxgate Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="/static/htmx.min.js" defer></script>
+</head>
+<body>
+    <header>
+        <nav>
+            <div class="nav-brand">Fluxgate</div>
+            <ul>
+                <li><a href="/?db={{.ActiveDB}}">Overview</a></li>
+                <li><a href="/findings?db={{.ActiveDB}}">Findings</a></li>
+                <li><a href="/disclosures?db={{.ActiveDB}}">Disclosures</a></li>
+            </ul>
+            {{if gt (len .DBs) 1}}
+            <div class="db-switcher">
+                {{range .DBs}}
+                <a href="?db={{.Name}}" class="db-pill{{if eq .Name $.ActiveDB}} active{{end}}">{{.Name}}</a>
+                {{end}}
+            </div>
+            {{end}}
+        </nav>
+    </header>
+    <main class="container">
+        {{template "content" .Data}}
+    </main>
+    <footer class="container">
+        <p>Fluxgate CI/CD Security Scanner</p>
+    </footer>
+</body>
+</html>

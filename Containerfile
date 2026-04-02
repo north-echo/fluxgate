@@ -1,4 +1,4 @@
-FROM docker.io/library/golang:1.22-bookworm AS builder
+FROM docker.io/library/golang:latest AS builder
 WORKDIR /build
 COPY go.mod go.sum ./
 RUN go mod download
