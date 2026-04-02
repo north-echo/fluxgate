@@ -9,7 +9,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/north-echo/fluxgate/internal/dashboard"
+	"github.com/north-echo/fluxgate/internal/diff"
+	"github.com/north-echo/fluxgate/internal/export"
 	ghclient "github.com/north-echo/fluxgate/internal/github"
+	"github.com/north-echo/fluxgate/internal/merge"
 	"github.com/north-echo/fluxgate/internal/report"
 	"github.com/north-echo/fluxgate/internal/scanner"
 	"github.com/north-echo/fluxgate/internal/store"
@@ -32,6 +36,11 @@ func main() {
 	rootCmd.AddCommand(newDiscoverCmd())
 	rootCmd.AddCommand(newIngestCmd())
 	rootCmd.AddCommand(newGatoxImportCmd())
+	rootCmd.AddCommand(newDisclosureCmd())
+	rootCmd.AddCommand(newDashboardCmd())
+	rootCmd.AddCommand(newDiffCmd())
+	rootCmd.AddCommand(newMergeCmd())
+	rootCmd.AddCommand(newExportCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -595,6 +604,284 @@ func extractReposFromMap(obj map[string]interface{}, seen map[string]bool, repos
 			}
 		}
 	}
+}
+
+func newDashboardCmd() *cobra.Command {
+	var dbPaths []string
+	var host string
+	var port int
+
+	cmd := &cobra.Command{
+		Use:   "dashboard",
+		Short: "Launch interactive web dashboard for scan results",
+		Long:  "Launch dashboard with one or more scan databases. Use multiple --db flags to enable the database switcher.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(dbPaths) == 0 {
+				dbPaths = []string{"findings.db"}
+			}
+
+			var entries []dashboard.DBEntry
+			for _, p := range dbPaths {
+				db, err := store.Open(p)
+				if err != nil {
+					return fmt.Errorf("opening %s: %w", p, err)
+				}
+				defer db.Close()
+				// Derive display name from filename
+				name := strings.TrimSuffix(p, ".db")
+				if idx := strings.LastIndex(name, "/"); idx >= 0 {
+					name = name[idx+1:]
+				}
+				entries = append(entries, dashboard.DBEntry{Name: name, DB: db})
+			}
+
+			srv := dashboard.NewMulti(entries)
+			addr := fmt.Sprintf("%s:%d", host, port)
+			fmt.Printf("fluxgate dashboard listening on http://%s\n", addr)
+			return srv.ListenAndServe(addr)
+		},
+	}
+	cmd.Flags().StringSliceVar(&dbPaths, "db", nil, "Database path(s) — use multiple times for DB switcher")
+	cmd.Flags().StringVar(&host, "host", "localhost", "Bind address")
+	cmd.Flags().IntVar(&port, "port", 8080, "HTTP port")
+	return cmd
+}
+
+func newDiffCmd() *cobra.Command {
+	var oldPath, newPath, format, output string
+
+	cmd := &cobra.Command{
+		Use:   "diff",
+		Short: "Compare two scan databases for new, resolved, and regressed findings",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := diff.Compare(oldPath, newPath)
+			if err != nil {
+				return err
+			}
+			var w = os.Stdout
+			if output != "" {
+				f, err := os.Create(output)
+				if err != nil {
+					return err
+				}
+				defer f.Close()
+				w = f
+			}
+			diff.WriteReport(w, result)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&oldPath, "old", "", "Path to older scan database")
+	cmd.Flags().StringVar(&newPath, "new", "", "Path to newer scan database")
+	cmd.Flags().StringVar(&format, "format", "table", "Output format (table)")
+	cmd.Flags().StringVar(&output, "output", "", "Output file (default: stdout)")
+	cmd.MarkFlagRequired("old")
+	cmd.MarkFlagRequired("new")
+	return cmd
+}
+
+func newMergeCmd() *cobra.Command {
+	var target string
+	var sources []string
+
+	cmd := &cobra.Command{
+		Use:   "merge",
+		Short: "Merge multiple scan databases into one",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			stats, err := merge.MergeDBs(target, sources)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("Merge complete: %d sources, %d repos merged (%d skipped), %d findings merged (%d skipped)\n",
+				stats.SourcesProcessed, stats.ReposMerged, stats.ReposSkipped,
+				stats.FindingsMerged, stats.FindingsSkipped)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&target, "target", "", "Output database path")
+	cmd.Flags().StringSliceVar(&sources, "sources", nil, "Source database paths (comma-separated)")
+	cmd.MarkFlagRequired("target")
+	cmd.MarkFlagRequired("sources")
+	return cmd
+}
+
+func newExportCmd() *cobra.Command {
+	var dbPath, format, output string
+
+	cmd := &cobra.Command{
+		Use:   "export",
+		Short: "Export anonymized dataset for academic research",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var w = os.Stdout
+			if output != "" {
+				f, err := os.Create(output)
+				if err != nil {
+					return err
+				}
+				defer f.Close()
+				w = f
+			}
+			switch format {
+			case "anonymized-csv", "csv":
+				return export.ExportAnonymizedCSV(dbPath, w)
+			case "anonymized-json", "json":
+				return export.ExportAnonymizedJSON(dbPath, w)
+			default:
+				return fmt.Errorf("unknown format %q (use anonymized-csv or anonymized-json)", format)
+			}
+		},
+	}
+	cmd.Flags().StringVar(&dbPath, "db", "findings.db", "Database path")
+	cmd.Flags().StringVar(&format, "format", "anonymized-csv", "Export format (anonymized-csv, anonymized-json)")
+	cmd.Flags().StringVar(&output, "output", "", "Output file (default: stdout)")
+	return cmd
+}
+
+func newDisclosureCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "disclosure",
+		Short: "Track vulnerability disclosure lifecycle",
+	}
+	cmd.AddCommand(newDisclosureAddCmd())
+	cmd.AddCommand(newDisclosureListCmd())
+	cmd.AddCommand(newDisclosureUpdateCmd())
+	cmd.AddCommand(newDisclosurePatchCmd())
+	return cmd
+}
+
+func newDisclosureAddCmd() *cobra.Command {
+	var findingID int64
+	var channel, disclosureID, dbPath string
+
+	cmd := &cobra.Command{
+		Use:   "add",
+		Short: "File a new disclosure for a finding",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			db, err := store.Open(dbPath)
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			disc, err := db.AddDisclosure(findingID, channel, disclosureID)
+			if err != nil {
+				return fmt.Errorf("adding disclosure: %w", err)
+			}
+			fmt.Printf("Disclosure #%d created (channel: %s, status: %s)\n", disc.ID, disc.Channel, disc.Status)
+			return nil
+		},
+	}
+	cmd.Flags().Int64Var(&findingID, "finding-id", 0, "Finding ID to disclose")
+	cmd.Flags().StringVar(&channel, "channel", "", "Disclosure channel (GHSA, HackerOne, email, vendor-portal)")
+	cmd.Flags().StringVar(&disclosureID, "id", "", "External disclosure ID (e.g., GHSA-xxxx)")
+	cmd.Flags().StringVar(&dbPath, "db", "findings.db", "Database path")
+	cmd.MarkFlagRequired("finding-id")
+	cmd.MarkFlagRequired("channel")
+	return cmd
+}
+
+func newDisclosureListCmd() *cobra.Command {
+	var status, dbPath string
+	var findingID int64
+
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List disclosures",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			db, err := store.Open(dbPath)
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			disclosures, err := db.ListDisclosures(status, findingID)
+			if err != nil {
+				return err
+			}
+			if len(disclosures) == 0 {
+				fmt.Println("No disclosures found.")
+				return nil
+			}
+			fmt.Printf("%-4s %-10s %-30s %-8s %-12s %-12s %s\n",
+				"ID", "Channel", "Repo", "Rule", "Status", "Filed", "Disclosure ID")
+			for _, d := range disclosures {
+				filed := d.FiledAt
+				if len(filed) > 10 {
+					filed = filed[:10]
+				}
+				fmt.Printf("%-4d %-10s %-30s %-8s %-12s %-12s %s\n",
+					d.ID, d.Channel, d.Owner+"/"+d.RepoName, d.RuleID, d.Status, filed, d.DisclosureID)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&status, "status", "", "Filter by status (filed/acknowledged/patched/wontfix/timeout)")
+	cmd.Flags().Int64Var(&findingID, "finding-id", 0, "Filter by finding ID")
+	cmd.Flags().StringVar(&dbPath, "db", "findings.db", "Database path")
+	return cmd
+}
+
+func newDisclosureUpdateCmd() *cobra.Command {
+	var id int64
+	var status, dbPath string
+
+	cmd := &cobra.Command{
+		Use:   "update",
+		Short: "Update disclosure status",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			valid := map[string]bool{"filed": true, "acknowledged": true, "patched": true, "wontfix": true, "timeout": true}
+			if !valid[status] {
+				return fmt.Errorf("invalid status %q (must be filed/acknowledged/patched/wontfix/timeout)", status)
+			}
+			db, err := store.Open(dbPath)
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			if err := db.UpdateDisclosureStatus(id, status); err != nil {
+				return err
+			}
+			fmt.Printf("Disclosure #%d updated to status: %s\n", id, status)
+			return nil
+		},
+	}
+	cmd.Flags().Int64Var(&id, "id", 0, "Disclosure ID")
+	cmd.Flags().StringVar(&status, "status", "", "New status")
+	cmd.Flags().StringVar(&dbPath, "db", "findings.db", "Database path")
+	cmd.MarkFlagRequired("id")
+	cmd.MarkFlagRequired("status")
+	return cmd
+}
+
+func newDisclosurePatchCmd() *cobra.Command {
+	var disclosureID int64
+	var commitURL, releaseTag, dbPath string
+
+	cmd := &cobra.Command{
+		Use:   "patch",
+		Short: "Record a patch for a disclosure",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			db, err := store.Open(dbPath)
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			p, err := db.AddPatch(disclosureID, commitURL, releaseTag)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("Patch #%d recorded for disclosure #%d\n", p.ID, disclosureID)
+			return nil
+		},
+	}
+	cmd.Flags().Int64Var(&disclosureID, "disclosure-id", 0, "Disclosure ID")
+	cmd.Flags().StringVar(&commitURL, "commit-url", "", "Fix commit URL")
+	cmd.Flags().StringVar(&releaseTag, "release", "", "Release tag with fix")
+	cmd.Flags().StringVar(&dbPath, "db", "findings.db", "Database path")
+	cmd.MarkFlagRequired("disclosure-id")
+	return cmd
 }
 
 func generateReport(db *store.DB, path string) error {

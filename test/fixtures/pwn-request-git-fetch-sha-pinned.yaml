@@ -1,0 +1,16 @@
+name: Test Fork PR SHA
+on:
+  pull_request_target:
+    types: [labeled]
+jobs:
+  test:
+    if: github.event.label.name == 'ready-to-merge'
+    environment: live-keys
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          git fetch origin ${{ github.event.pull_request.head.sha }}
+          git checkout FETCH_HEAD
+          git diff --stat HEAD
+      - run: pip install -e ".[dev,test]"

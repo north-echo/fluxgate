@@ -710,6 +710,120 @@ func TestCheckBotActorTOCTOU_NoBotGuard(t *testing.T) {
 	}
 }
 
+// --- FG-001 pip install argument parsing ---
+
+func TestCheckPwnRequest_PipNamedPackage(t *testing.T) {
+	wf := loadFixture(t, "pwn-request-pip-named-package.yaml")
+	findings := CheckPwnRequest(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(findings))
+	}
+	f := findings[0]
+	if f.Severity != SeverityHigh {
+		t.Errorf("expected high severity for named package (pattern-only), got %s", f.Severity)
+	}
+	if f.Confidence != ConfidencePatternOnly {
+		t.Errorf("expected pattern-only confidence for named pip package, got %s", f.Confidence)
+	}
+}
+
+func TestClassifyPipInstall(t *testing.T) {
+	tests := []struct {
+		args      string
+		confirmed bool
+	}{
+		// Confirmed: attacker controls installed code
+		{"", true},
+		{".", true},
+		{"-e .", true},
+		{"-e ./subdir", true},
+		{"./packages/core", true},
+		{"-r requirements.txt", true},
+		{"--requirement dev-requirements.txt", true},
+		{`".[dev]"`, true},
+		{`".[dev,test]"`, true},
+		{`-e ".[dev]"`, true},
+		{`-e ".[dev,test]"`, true},
+
+		// Not confirmed: named packages from PyPI
+		{`"black[jupyter]"`, false},
+		{"flake8 mypy black", false},
+		{"--upgrade pip setuptools", false},
+		{"requests", false},
+		{"--upgrade pip", false},
+	}
+	for _, tt := range tests {
+		confirmed, _ := classifyPipInstall(tt.args)
+		if confirmed != tt.confirmed {
+			t.Errorf("classifyPipInstall(%q) = %v, want %v", tt.args, confirmed, tt.confirmed)
+		}
+	}
+}
+
+// --- FG-001 if-guard tests (false positive reduction) ---
+
+func TestCheckPwnRequest_IfGuarded(t *testing.T) {
+	wf := loadFixture(t, "pwn-request-if-guarded.yaml")
+	findings := CheckPwnRequest(wf)
+
+	if len(findings) != 0 {
+		t.Fatalf("expected 0 FG-001 findings for if-guarded job, got %d", len(findings))
+	}
+}
+
+func TestCheckPwnRequest_IfGuardedMixed(t *testing.T) {
+	wf := loadFixture(t, "pwn-request-if-guarded-mixed.yaml")
+	findings := CheckPwnRequest(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 FG-001 finding (unsafe-merge only), got %d", len(findings))
+	}
+	f := findings[0]
+	if f.Severity != SeverityCritical {
+		t.Errorf("expected critical severity for unguarded job, got %s", f.Severity)
+	}
+	if f.Confidence != ConfidenceConfirmed {
+		t.Errorf("expected confirmed confidence, got %s", f.Confidence)
+	}
+}
+
+// --- FG-001 git fetch detection (false negative reduction) ---
+
+func TestCheckPwnRequest_GitFetch(t *testing.T) {
+	wf := loadFixture(t, "pwn-request-git-fetch.yaml")
+	findings := CheckPwnRequest(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 FG-001 finding for git fetch PR head, got %d", len(findings))
+	}
+	f := findings[0]
+	if f.RuleID != "FG-001" {
+		t.Errorf("expected FG-001, got %s", f.RuleID)
+	}
+	if f.Confidence != ConfidenceConfirmed {
+		t.Errorf("expected confirmed confidence (pip install after git fetch), got %s", f.Confidence)
+	}
+	// Should have label gate mitigation
+	if len(f.Mitigations) == 0 {
+		t.Error("expected mitigations to note label gate")
+	}
+}
+
+func TestCheckPwnRequest_GitFetchSHAPinned(t *testing.T) {
+	wf := loadFixture(t, "pwn-request-git-fetch-sha-pinned.yaml")
+	findings := CheckPwnRequest(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 FG-001 finding for git fetch SHA-pinned, got %d", len(findings))
+	}
+	f := findings[0]
+	// Label gate + environment gate = downgrade by 2
+	if f.Severity != SeverityMedium {
+		t.Errorf("expected medium severity (downgraded by 2: label+env), got %s", f.Severity)
+	}
+}
+
 // --- FG-002 extension: workflow_dispatch/call injection ---
 
 func TestCheckScriptInjection_DispatchInputs(t *testing.T) {

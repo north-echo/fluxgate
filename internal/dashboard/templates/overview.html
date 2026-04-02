@@ -1,0 +1,78 @@
+{{define "content"}}
+<h1>Dashboard Overview</h1>
+
+<div class="stats-cards">
+    <div class="card">
+        <div class="card-value">{{.Stats.ReposScanned}}</div>
+        <div class="card-label">Repos Scanned</div>
+    </div>
+    <div class="card">
+        <div class="card-value">{{.Stats.ReposWithFinds}}</div>
+        <div class="card-label">Repos with Findings</div>
+    </div>
+    <div class="card">
+        <div class="card-value">{{.Stats.TotalFindings}}</div>
+        <div class="card-label">Total Findings</div>
+    </div>
+</div>
+
+<div class="stats-cards">
+    {{range $sev, $count := .Stats.BySeverity}}
+    <div class="card">
+        <div class="card-value"><span class="badge severity-{{$sev}}">{{$count}}</span></div>
+        <div class="card-label">{{$sev}}</div>
+    </div>
+    {{end}}
+</div>
+
+{{if .HeatmapOrgs}}
+<h2>Severity Heatmap by Organization</h2>
+<table class="heatmap">
+    <thead>
+        <tr>
+            <th>Organization</th>
+            {{range .Severities}}
+            <th>{{.}}</th>
+            {{end}}
+        </tr>
+    </thead>
+    <tbody>
+        {{range $org := .HeatmapOrgs}}
+        <tr>
+            <td><a href="/findings?owner={{$org}}">{{$org}}</a></td>
+            {{range $sev := $.Severities}}
+            {{$count := index (index $.Heatmap $org) $sev}}
+            <td class="heatmap-cell" data-severity="{{$sev}}" data-count="{{$count}}">{{$count}}</td>
+            {{end}}
+        </tr>
+        {{end}}
+    </tbody>
+</table>
+{{end}}
+
+{{if .DisclosureStats.Total}}
+<h2>Disclosure Status</h2>
+<div class="stats-cards">
+    <div class="card">
+        <div class="card-value"><span class="badge status-filed">{{.DisclosureStats.Filed}}</span></div>
+        <div class="card-label">Filed</div>
+    </div>
+    <div class="card">
+        <div class="card-value"><span class="badge status-acknowledged">{{.DisclosureStats.Acknowledged}}</span></div>
+        <div class="card-label">Acknowledged</div>
+    </div>
+    <div class="card">
+        <div class="card-value"><span class="badge status-patched">{{.DisclosureStats.Patched}}</span></div>
+        <div class="card-label">Patched</div>
+    </div>
+    <div class="card">
+        <div class="card-value"><span class="badge status-wontfix">{{.DisclosureStats.WontFix}}</span></div>
+        <div class="card-label">Won't Fix</div>
+    </div>
+    <div class="card">
+        <div class="card-value"><span class="badge status-timeout">{{.DisclosureStats.Timeout}}</span></div>
+        <div class="card-label">Timeout</div>
+    </div>
+</div>
+{{end}}
+{{end}}

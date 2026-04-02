@@ -126,6 +126,12 @@ func (c *Client) BatchScan(ctx context.Context, repos []RepoInfo, opts BatchOpti
 			}
 		}
 
+		// Check no-workflow cache (skip API call for repos known to have no workflows)
+		if opts.DB.HasNoWorkflows(repo.Owner, repo.Name, 7) {
+			skipped++
+			continue
+		}
+
 		fmt.Printf("[%d/%d] Scanning %s/%s", i+1, total, repo.Owner, repo.Name)
 		if repo.Stars > 0 {
 			fmt.Printf(" (%d stars)", repo.Stars)
@@ -135,6 +141,10 @@ func (c *Client) BatchScan(ctx context.Context, repos []RepoInfo, opts BatchOpti
 		result, err := c.ScanRemote(ctx, repo.Owner, repo.Name, opts.Opts)
 		if err != nil {
 			fmt.Printf("  Error: %v\n", err)
+			// Cache repos with no workflows directory (404 errors)
+			if strings.Contains(err.Error(), "404 Not Found") {
+				opts.DB.MarkNoWorkflows(repo.Owner, repo.Name)
+			}
 			// Store the repo as scanned but with 0 findings so we don't retry
 			emptyResult := &scanner.ScanResult{Path: fmt.Sprintf("%s/%s", repo.Owner, repo.Name)}
 			if saveErr := opts.DB.SaveResult(repo.Owner, repo.Name, repo.Stars, repo.Language, emptyResult); saveErr != nil {

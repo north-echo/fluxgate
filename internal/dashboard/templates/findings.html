@@ -1,0 +1,31 @@
+{{define "content"}}
+<h1>Findings <small>({{.Total}} total)</small></h1>
+
+<div class="filters">
+    <form hx-get="/findings" hx-target="#findings-table" hx-push-url="true">
+        <label>
+            Severity
+            <select name="severity" onchange="this.form.requestSubmit()">
+                <option value="">All</option>
+                <option value="critical" {{if eq .Severity "critical"}}selected{{end}}>Critical</option>
+                <option value="high" {{if eq .Severity "high"}}selected{{end}}>High</option>
+                <option value="medium" {{if eq .Severity "medium"}}selected{{end}}>Medium</option>
+                <option value="low" {{if eq .Severity "low"}}selected{{end}}>Low</option>
+                <option value="info" {{if eq .Severity "info"}}selected{{end}}>Info</option>
+            </select>
+        </label>
+        <label>
+            Rule
+            <input type="text" name="rule" value="{{.Rule}}" placeholder="e.g. FG-001" onchange="this.form.requestSubmit()">
+        </label>
+        <label>
+            Org
+            <input type="text" name="owner" value="{{.Owner}}" placeholder="e.g. acme-corp" onchange="this.form.requestSubmit()">
+        </label>
+    </form>
+</div>
+
+<div id="findings-table">
+    {{template "findings-table" .}}
+</div>
+{{end}}
