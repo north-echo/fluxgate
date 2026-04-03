@@ -824,12 +824,12 @@ func newDisclosureListCmd() *cobra.Command {
 			fmt.Printf("%-4s %-10s %-30s %-8s %-12s %-12s %s\n",
 				"ID", "Channel", "Repo", "Rule", "Status", "Filed", "Disclosure ID")
 			for _, d := range disclosures {
-				filed := d.FiledAt
+				filed := d.FiledAt.String
 				if len(filed) > 10 {
 					filed = filed[:10]
 				}
 				fmt.Printf("%-4d %-10s %-30s %-8s %-12s %-12s %s\n",
-					d.ID, d.Channel, d.Owner+"/"+d.RepoName, d.RuleID, d.Status, filed, d.DisclosureID)
+					d.ID, d.Channel, d.Owner+"/"+d.RepoName, d.RuleID, d.Status, filed, d.DisclosureID.String)
 			}
 			return nil
 		},

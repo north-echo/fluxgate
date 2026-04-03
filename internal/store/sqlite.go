@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"fmt"
 
 	"github.com/jmoiron/sqlx"
@@ -233,17 +234,17 @@ func (d *DB) GetCriticalFindings() ([]CriticalFinding, error) {
 
 // Disclosure represents a vulnerability disclosure filing.
 type Disclosure struct {
-	ID           int64  `db:"id"`
-	FindingID    int64  `db:"finding_id"`
-	Channel      string `db:"channel"`
-	DisclosureID string `db:"disclosure_id"`
-	Status       string `db:"status"`
-	FiledAt      string `db:"filed_at"`
-	ResponseAt   string `db:"response_at"`
-	PatchedAt    string `db:"patched_at"`
-	Notes        string `db:"notes"`
-	CreatedAt    string `db:"created_at"`
-	UpdatedAt    string `db:"updated_at"`
+	ID           int64          `db:"id"`
+	FindingID    int64          `db:"finding_id"`
+	Channel      string         `db:"channel"`
+	DisclosureID sql.NullString `db:"disclosure_id"`
+	Status       string         `db:"status"`
+	FiledAt      sql.NullString `db:"filed_at"`
+	ResponseAt   sql.NullString `db:"response_at"`
+	PatchedAt    sql.NullString `db:"patched_at"`
+	Notes        sql.NullString `db:"notes"`
+	CreatedAt    sql.NullString `db:"created_at"`
+	UpdatedAt    sql.NullString `db:"updated_at"`
 }
 
 // DisclosureWithContext joins a disclosure with its finding and repo info.
