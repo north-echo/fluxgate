@@ -152,15 +152,28 @@ func checkGitLabScriptInjection(pipeline *GitLabPipeline) []GitLabFinding {
 			}
 			for _, dv := range dangerousVars {
 				if strings.Contains(step.Command, dv) {
+					severity := severityHigh
+					details := "User-controllable CI variables in script blocks can be exploited for command injection via crafted branch names, commit messages, or MR titles."
+
+					// Downgrade: echo/printf is logging, not exploitable injection
+					if isLoggingOnlyUsage(step.Command, dv) {
+						severity = severityInfo
+						details = "Variable used in echo/printf for logging. Not directly exploitable but may leak sensitive metadata to build logs."
+					} else if isQuotedArgUsage(step.Command, dv) {
+						// Quoted CLI argument — harder to exploit than unquoted interpolation
+						severity = severityMedium
+						details = "Variable used as a quoted CLI argument. Exploitation requires breaking out of the quoted context, which is significantly harder than unquoted shell interpolation."
+					}
+
 					findings = append(findings, GitLabFinding{
 						RuleID:   "GL-002",
-						Severity: severityHigh,
+						Severity: severity,
 						File:     pipeline.FilePath(),
 						Line:     step.Line,
 						Message: fmt.Sprintf(
 							"GitLab Script Injection: %s used in script block of job '%s'",
 							dv, job.Name),
-						Details: "User-controllable CI variables in script blocks can be exploited for command injection via crafted branch names, commit messages, or MR titles.",
+						Details: details,
 					})
 					break
 				}
@@ -168,6 +181,47 @@ func checkGitLabScriptInjection(pipeline *GitLabPipeline) []GitLabFinding {
 		}
 	}
 	return findings
+}
+
+// isLoggingOnlyUsage checks if a variable is only used in echo/printf statements.
+func isLoggingOnlyUsage(cmd, varRef string) bool {
+	for _, line := range strings.Split(cmd, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.Contains(trimmed, varRef) {
+			continue
+		}
+		// If this line uses the variable and is NOT an echo/printf, it's not logging-only
+		lower := strings.ToLower(trimmed)
+		isEcho := strings.HasPrefix(lower, "echo ") || strings.HasPrefix(lower, "echo\t") ||
+			strings.HasPrefix(lower, "printf ") || strings.HasPrefix(lower, "printf\t") ||
+			strings.Contains(lower, "| echo") || strings.HasPrefix(lower, "- echo ")
+		if !isEcho {
+			return false
+		}
+	}
+	return true
+}
+
+// isQuotedArgUsage checks if a variable appears inside double quotes as a CLI argument.
+func isQuotedArgUsage(cmd, varRef string) bool {
+	for _, line := range strings.Split(cmd, "\n") {
+		if !strings.Contains(line, varRef) {
+			continue
+		}
+		// Check if the variable reference is inside double quotes
+		idx := strings.Index(line, varRef)
+		if idx < 0 {
+			continue
+		}
+		// Look for surrounding double quotes
+		before := line[:idx]
+		after := line[idx+len(varRef):]
+		quotesBefore := strings.Count(before, "\"") - strings.Count(before, "\\\"")
+		if quotesBefore%2 == 1 && strings.Contains(after, "\"") {
+			return true // Inside double quotes
+		}
+	}
+	return false
 }
 
 // checkGitLabUnsafeIncludes detects external includes from unversioned or
@@ -557,16 +611,35 @@ func checkGitLabCachePoisoning(pipeline *GitLabPipeline) []GitLabFinding {
 		}
 
 		for _, key := range job.CacheKeys {
-			// Predictable/shared cache keys are especially dangerous
-			isPredictable := strings.Contains(key, "${CI_COMMIT_REF_SLUG}") ||
-				strings.Contains(key, "$CI_COMMIT_REF_SLUG") ||
-				strings.Contains(key, "${CI_DEFAULT_BRANCH}") ||
+			// CI_COMMIT_REF_SLUG keys are ref-scoped by default since GitLab 13.x
+			// Each branch gets its own cache namespace, so MR pipelines can't poison
+			// the default branch cache. Only flag truly shared keys.
+			isRefScoped := strings.Contains(key, "CI_COMMIT_REF_SLUG") ||
+				strings.Contains(key, "CI_COMMIT_REF_NAME") ||
+				strings.Contains(key, "CI_MERGE_REQUEST_IID")
+
+			if isRefScoped {
+				// Ref-scoped keys are safe by default in modern GitLab — downgrade to info
+				findings = append(findings, GitLabFinding{
+					RuleID:   "GL-010",
+					Severity: severityInfo,
+					File:     pipeline.FilePath(),
+					Message: fmt.Sprintf(
+						"GitLab Cache: job '%s' uses ref-scoped cache key '%s' (mitigated by GitLab cache scoping)",
+						job.Name, key),
+					Details: "Cache key uses a ref-derived variable. Since GitLab 13.x, caches are scoped by ref by default, preventing cross-branch cache poisoning. This is informational only.",
+				})
+				continue
+			}
+
+			// Truly shared keys — static key or project-wide variable
+			isShared := strings.Contains(key, "${CI_DEFAULT_BRANCH}") ||
 				strings.Contains(key, "$CI_DEFAULT_BRANCH") ||
 				strings.Contains(key, "${CI_PROJECT_ID}") ||
 				strings.Contains(key, "$CI_PROJECT_ID") ||
 				!strings.Contains(key, "$") // static key shared across branches
 
-			if isPredictable {
+			if isShared {
 				findings = append(findings, GitLabFinding{
 					RuleID:   "GL-010",
 					Severity: severityMedium,
@@ -574,7 +647,7 @@ func checkGitLabCachePoisoning(pipeline *GitLabPipeline) []GitLabFinding {
 					Message: fmt.Sprintf(
 						"GitLab Cache Poisoning: job '%s' uses shared cache key '%s' on merge_request_event pipeline",
 						job.Name, key),
-					Details: "Shared or predictable cache keys on merge_request_event pipelines allow fork MR authors to poison the cache. Subsequent builds on the default branch may execute poisoned cached artifacts. Use per-MR cache keys or disable caching for MR pipelines.",
+					Details: "Static or project-wide cache keys on merge_request_event pipelines may allow fork MR authors to poison the cache if cache scoping is disabled or overridden.",
 				})
 			}
 		}

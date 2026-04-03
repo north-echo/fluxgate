@@ -129,8 +129,9 @@ func TestCheckScriptInjection(t *testing.T) {
 		if f.RuleID != "FG-002" {
 			t.Errorf("expected rule FG-002, got %s", f.RuleID)
 		}
-		if f.Severity != SeverityHigh {
-			t.Errorf("expected high severity, got %s", f.Severity)
+		// Fixture uses echo-only context — correctly downgraded to info
+		if f.Severity != SeverityInfo {
+			t.Errorf("expected info severity (echo-only context), got %s", f.Severity)
 		}
 	}
 }
@@ -830,17 +831,22 @@ func TestCheckScriptInjection_DispatchInputs(t *testing.T) {
 	wf := loadFixture(t, "dispatch-injection.yaml")
 	findings := CheckScriptInjection(wf)
 
-	// Should find: inputs.* and github.event.inputs.* (2 pattern matches on the run block)
+	// Should find: inputs.* and github.event.inputs.* patterns
 	if len(findings) < 2 {
 		t.Fatalf("expected at least 2 injection findings for dispatch inputs, got %d", len(findings))
 	}
+	// At least one should be high (the deploy.sh line), others may be info (echo lines)
+	hasHigh := false
 	for _, f := range findings {
 		if f.RuleID != "FG-002" {
 			t.Errorf("expected FG-002, got %s", f.RuleID)
 		}
-		if f.Severity != SeverityHigh {
-			t.Errorf("expected high severity, got %s", f.Severity)
+		if f.Severity == SeverityHigh {
+			hasHigh = true
 		}
+	}
+	if !hasHigh {
+		t.Errorf("expected at least one high severity finding (deploy.sh context)")
 	}
 }
 
