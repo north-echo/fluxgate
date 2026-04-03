@@ -861,3 +861,180 @@ func TestRuleFilter(t *testing.T) {
 		}
 	}
 }
+
+// --- FG-012 If Always True tests ---
+
+func TestCheckIfAlwaysTrue(t *testing.T) {
+	wf := loadFixture(t, "if-always-true.yaml")
+	findings := CheckIfAlwaysTrue(wf)
+
+	if len(findings) != 2 {
+		t.Fatalf("expected 2 findings (broken job guard + multi-expr step), got %d", len(findings))
+	}
+	for _, f := range findings {
+		if f.RuleID != "FG-012" {
+			t.Errorf("expected FG-012, got %s", f.RuleID)
+		}
+		if f.Severity != SeverityHigh {
+			t.Errorf("expected high severity, got %s", f.Severity)
+		}
+	}
+}
+
+func TestCheckIfAlwaysTrue_Safe(t *testing.T) {
+	wf := loadFixture(t, "safe-workflow.yaml")
+	findings := CheckIfAlwaysTrue(wf)
+	if len(findings) != 0 {
+		t.Fatalf("expected 0 findings for safe workflow, got %d", len(findings))
+	}
+}
+
+// --- FG-013 All Secrets Exposed tests ---
+
+func TestCheckAllSecretsExposed(t *testing.T) {
+	wf := loadFixture(t, "all-secrets-exposed.yaml")
+	findings := CheckAllSecretsExposed(wf)
+
+	if len(findings) != 2 {
+		t.Fatalf("expected 2 findings (toJSON + dynamic access), got %d", len(findings))
+	}
+	for _, f := range findings {
+		if f.RuleID != "FG-013" {
+			t.Errorf("expected FG-013, got %s", f.RuleID)
+		}
+		// pull_request_target trigger = critical
+		if f.Severity != SeverityCritical {
+			t.Errorf("expected critical severity on PRT trigger, got %s", f.Severity)
+		}
+	}
+}
+
+func TestCheckAllSecretsExposed_Safe(t *testing.T) {
+	wf := loadFixture(t, "safe-workflow.yaml")
+	findings := CheckAllSecretsExposed(wf)
+	if len(findings) != 0 {
+		t.Fatalf("expected 0 findings for safe workflow, got %d", len(findings))
+	}
+}
+
+// --- FG-014 Missing Permissions on Risky Events tests ---
+
+func TestCheckMissingPermsRisky(t *testing.T) {
+	wf := loadFixture(t, "missing-perms-risky.yaml")
+	findings := CheckMissingPermsRisky(wf)
+
+	// Only the "no-perms" job should be flagged; "has-perms" has explicit permissions
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding (no-perms job only), got %d", len(findings))
+	}
+	f := findings[0]
+	if f.RuleID != "FG-014" {
+		t.Errorf("expected FG-014, got %s", f.RuleID)
+	}
+	if f.Severity != SeverityMedium {
+		t.Errorf("expected medium severity, got %s", f.Severity)
+	}
+}
+
+func TestCheckMissingPermsRisky_Safe(t *testing.T) {
+	wf := loadFixture(t, "safe-workflow.yaml")
+	findings := CheckMissingPermsRisky(wf)
+	if len(findings) != 0 {
+		t.Fatalf("expected 0 findings for safe workflow (pull_request trigger), got %d", len(findings))
+	}
+}
+
+// --- FG-015 Curl Pipe Bash tests ---
+
+func TestCheckCurlPipeBash(t *testing.T) {
+	wf := loadFixture(t, "curl-pipe-bash.yaml")
+	findings := CheckCurlPipeBash(wf)
+
+	// Expect: curl|bash, wget|sh, bash <(curl), deno run -A, commit-pinned (info), powershell
+	if len(findings) < 5 {
+		t.Fatalf("expected at least 5 findings, got %d", len(findings))
+	}
+
+	var mediumCount, infoCount int
+	for _, f := range findings {
+		if f.RuleID != "FG-015" {
+			t.Errorf("expected FG-015, got %s", f.RuleID)
+		}
+		switch f.Severity {
+		case SeverityMedium:
+			mediumCount++
+		case SeverityInfo:
+			infoCount++
+		}
+	}
+	if infoCount < 1 {
+		t.Errorf("expected at least 1 info finding (commit-pinned), got %d", infoCount)
+	}
+	if mediumCount < 4 {
+		t.Errorf("expected at least 4 medium findings, got %d", mediumCount)
+	}
+}
+
+func TestCheckCurlPipeBash_Safe(t *testing.T) {
+	wf := loadFixture(t, "safe-workflow.yaml")
+	findings := CheckCurlPipeBash(wf)
+	if len(findings) != 0 {
+		t.Fatalf("expected 0 findings for safe workflow, got %d", len(findings))
+	}
+}
+
+// --- FG-016 Local Action After Untrusted Checkout tests ---
+
+func TestCheckLocalActionUntrustedCheckout(t *testing.T) {
+	wf := loadFixture(t, "local-action-untrusted.yaml")
+	findings := CheckLocalActionUntrustedCheckout(wf)
+
+	if len(findings) != 2 {
+		t.Fatalf("expected 2 findings (two local actions after fork checkout), got %d", len(findings))
+	}
+	for _, f := range findings {
+		if f.RuleID != "FG-016" {
+			t.Errorf("expected FG-016, got %s", f.RuleID)
+		}
+		if f.Severity != SeverityCritical {
+			t.Errorf("expected critical severity, got %s", f.Severity)
+		}
+	}
+}
+
+func TestCheckLocalActionUntrustedCheckout_Safe(t *testing.T) {
+	wf := loadFixture(t, "safe-workflow.yaml")
+	findings := CheckLocalActionUntrustedCheckout(wf)
+	if len(findings) != 0 {
+		t.Fatalf("expected 0 findings for safe workflow, got %d", len(findings))
+	}
+}
+
+// --- FG-017 GitHub Script Injection tests ---
+
+func TestCheckGitHubScriptInjection(t *testing.T) {
+	wf := loadFixture(t, "github-script-injection.yaml")
+	findings := CheckGitHubScriptInjection(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding (comment.body injection), got %d", len(findings))
+	}
+	f := findings[0]
+	if f.RuleID != "FG-017" {
+		t.Errorf("expected FG-017, got %s", f.RuleID)
+	}
+	if f.Severity != SeverityHigh {
+		t.Errorf("expected high severity, got %s", f.Severity)
+	}
+	if !strings.Contains(f.Message, "comment.body") {
+		t.Error("expected message to mention comment.body")
+	}
+}
+
+func TestCheckGitHubScriptInjection_Safe(t *testing.T) {
+	wf := loadFixture(t, "safe-workflow.yaml")
+	findings := CheckGitHubScriptInjection(wf)
+	if len(findings) != 0 {
+		t.Fatalf("expected 0 findings for safe workflow, got %d", len(findings))
+	}
+}

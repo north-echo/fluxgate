@@ -1,0 +1,24 @@
+name: Curl Pipe Bash Test
+on: push
+jobs:
+  install-tools:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Curl pipe bash
+        run: |
+          curl -fsSL https://example.com/install.sh | bash
+      - name: Wget pipe sh
+        run: |
+          wget -qO- https://example.com/setup.sh | sh
+      - name: Bash process substitution
+        run: |
+          bash <(curl -s https://example.com/run.sh)
+      - name: Deno remote
+        run: |
+          deno run -A https://example.com/script.ts
+      - name: Commit pinned safe
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/owner/repo/abc1234567890abc1234567890abc1234567890a/install.sh | bash
+      - name: PowerShell download
+        run: |
+          powershell -Command "Invoke-Expression (New-Object Net.WebClient).DownloadString('https://example.com/install.ps1')"

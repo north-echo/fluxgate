@@ -23,6 +23,12 @@ func AllRules() map[string]Rule {
 		"FG-009": CheckSelfHostedRunner,
 		"FG-010": CheckCachePoisoning,
 		"FG-011": CheckBotActorTOCTOU,
+		"FG-012": CheckIfAlwaysTrue,
+		"FG-013": CheckAllSecretsExposed,
+		"FG-014": CheckMissingPermsRisky,
+		"FG-015": CheckCurlPipeBash,
+		"FG-016": CheckLocalActionUntrustedCheckout,
+		"FG-017": CheckGitHubScriptInjection,
 	}
 }
 
@@ -39,6 +45,12 @@ var RuleDescriptions = map[string]string{
 	"FG-009": "Self-Hosted Runner",
 	"FG-010": "Cache Poisoning",
 	"FG-011": "Bot Actor Guard TOCTOU",
+	"FG-012": "If Always True",
+	"FG-013": "All Secrets Exposed",
+	"FG-014": "Missing Permissions on Risky Events",
+	"FG-015": "Unverified Script Execution",
+	"FG-016": "Local Action After Untrusted Checkout",
+	"FG-017": "GitHub Script Injection",
 }
 
 // ExecutionAnalysis captures the result of post-checkout step analysis.
@@ -1896,4 +1908,359 @@ func describePermissions(wfPerms, jobPerms PermissionsConfig) string {
 		return "restricted"
 	}
 	return strings.Join(parts, ", ")
+}
+
+// ifExprPattern matches ${{ ... }} expressions in a string.
+var ifExprPattern = regexp.MustCompile(`\$\{\{.*?\}\}`)
+
+// CheckIfAlwaysTrue detects malformed if: conditions where ${{ }} expressions
+// don't span the entire string, causing GitHub Actions to treat the whole value
+// as a truthy non-empty string (FG-012).
+func CheckIfAlwaysTrue(wf *Workflow) []Finding {
+	var findings []Finding
+
+	checkIf := func(ifExpr string, context string, line int) {
+		if ifExpr == "" {
+			return
+		}
+		trimmed := strings.TrimSpace(ifExpr)
+
+		// If no ${{ }} at all, GitHub auto-wraps — this is the correct bare expression form
+		if !strings.Contains(trimmed, "${{") {
+			return
+		}
+
+		// Safe: entire value is exactly one ${{ expr }}
+		if strings.HasPrefix(trimmed, "${{") && strings.HasSuffix(trimmed, "}}") {
+			// Check that there's only one ${{ ... }} block
+			matches := ifExprPattern.FindAllStringIndex(trimmed, -1)
+			if len(matches) == 1 && matches[0][0] == 0 && matches[0][1] == len(trimmed) {
+				return
+			}
+			// Multiple ${{ }} blocks inside — falls through to flag
+		}
+
+		// Intentionally always-true builtins that users commonly write this way
+		lower := strings.ToLower(trimmed)
+		if lower == "always()" || lower == "${{ always() }}" ||
+			lower == "failure()" || lower == "${{ failure() }}" ||
+			lower == "cancelled()" || lower == "${{ cancelled() }}" ||
+			lower == "success()" || lower == "${{ success() }}" {
+			return
+		}
+
+		findings = append(findings, Finding{
+			RuleID:   "FG-012",
+			Severity: SeverityHigh,
+			File:     wf.Path,
+			Line:     line,
+			Message: fmt.Sprintf(
+				"If Always True: %s if: condition '%s' has ${{ }} that doesn't span the entire value — "+
+					"GitHub evaluates it as a non-empty string (always truthy)",
+				context, truncate(trimmed, 80)),
+			Details: "When an if: value contains text outside ${{ }}, GitHub does not evaluate it " +
+				"as an expression. Instead, it treats the entire string as a non-empty string " +
+				"which is always truthy. Security guards using this pattern are silently no-ops.",
+		})
+	}
+
+	for jobName, job := range wf.Jobs {
+		checkIf(job.If, fmt.Sprintf("job '%s'", jobName), 1)
+		for _, step := range job.Steps {
+			stepDesc := fmt.Sprintf("step (line %d)", step.Line)
+			if step.Name != "" {
+				stepDesc = fmt.Sprintf("step '%s'", step.Name)
+			}
+			checkIf(step.If, stepDesc, step.Line)
+		}
+	}
+	return findings
+}
+
+// CheckAllSecretsExposed detects toJSON(secrets) or secrets[ in run blocks and
+// env values, which exposes all repository secrets at once (FG-013).
+func CheckAllSecretsExposed(wf *Workflow) []Finding {
+	var findings []Finding
+
+	dangerousPatterns := []string{
+		"toJSON(secrets)",
+		"tojson(secrets)",
+		"secrets[",
+	}
+
+	isRiskyTrigger := wf.On.PullRequestTarget || wf.On.IssueComment
+
+	checkContent := func(content string, step Step) {
+		lower := strings.ToLower(content)
+		for _, pat := range dangerousPatterns {
+			if strings.Contains(lower, strings.ToLower(pat)) {
+				severity := SeverityHigh
+				if isRiskyTrigger {
+					severity = SeverityCritical
+				}
+				findings = append(findings, Finding{
+					RuleID:   "FG-013",
+					Severity: severity,
+					File:     wf.Path,
+					Line:     step.Line,
+					Message: fmt.Sprintf(
+						"All Secrets Exposed: '%s' in step (line %d) dumps all repository secrets",
+						pat, step.Line),
+					Details: "Using toJSON(secrets) or dynamic secrets[] access exposes every " +
+						"repository secret in the job. If any attacker-controlled code runs in " +
+						"the same job, all secrets can be exfiltrated.",
+				})
+				return // one finding per step
+			}
+		}
+	}
+
+	for _, job := range wf.Jobs {
+		for _, step := range job.Steps {
+			if step.Run != "" {
+				checkContent(step.Run, step)
+			}
+			for _, v := range step.Env {
+				checkContent(v, step)
+			}
+			for _, v := range step.With {
+				checkContent(v, step)
+			}
+		}
+	}
+	return findings
+}
+
+// CheckMissingPermsRisky detects workflows triggered by risky events
+// (pull_request_target, issue_comment, workflow_run) where neither the
+// workflow nor any job sets an explicit permissions block (FG-014).
+func CheckMissingPermsRisky(wf *Workflow) []Finding {
+	isRisky := wf.On.PullRequestTarget || wf.On.IssueComment || wf.On.WorkflowRun
+	if !isRisky {
+		return nil
+	}
+
+	// If the workflow sets permissions, it applies to all jobs
+	if wf.Permissions.Set {
+		return nil
+	}
+
+	var findings []Finding
+	for jobName, job := range wf.Jobs {
+		if job.Permissions.Set {
+			continue
+		}
+		trigger := ""
+		if wf.On.PullRequestTarget {
+			trigger = "pull_request_target"
+		} else if wf.On.IssueComment {
+			trigger = "issue_comment"
+		} else if wf.On.WorkflowRun {
+			trigger = "workflow_run"
+		}
+
+		findings = append(findings, Finding{
+			RuleID:   "FG-014",
+			Severity: SeverityMedium,
+			File:     wf.Path,
+			Line:     1,
+			Message: fmt.Sprintf(
+				"Missing Permissions: job '%s' on %s trigger has no permissions block — "+
+					"inherits repository default (often write-all)",
+				jobName, trigger),
+			Details: "Without an explicit permissions block, the workflow inherits the " +
+				"repository or organization default, which is often write-all. On risky " +
+				"triggers like pull_request_target and issue_comment, this grants untrusted " +
+				"code broad access to the repository and its secrets.",
+		})
+	}
+	return findings
+}
+
+// curlPipeBashPattern matches curl/wget piped to bash/sh.
+var curlPipeBashPattern = regexp.MustCompile(`(?i)(curl|wget)\s+[^|]*\|\s*(ba)?sh\b`)
+
+// bashProcessSubPattern matches bash <(curl ...) or sh <(curl ...).
+var bashProcessSubPattern = regexp.MustCompile(`(?i)(ba)?sh\s+<\(\s*(curl|wget)\s`)
+
+// invokeExprPattern matches PowerShell Invoke-Expression with DownloadString.
+var invokeExprPattern = regexp.MustCompile(`(?i)Invoke-Expression.*DownloadString`)
+
+// denoRunHTTPPattern matches deno run with -A flag and https URL.
+var denoRunHTTPPattern = regexp.MustCompile(`(?i)deno\s+run\s+[^\n]*-A[^\n]*https://`)
+
+// commitPinnedURLPattern matches URLs containing a 40-char hex SHA (commit-pinned).
+var commitPinnedURLPattern = regexp.MustCompile(`[a-f0-9]{40}`)
+
+// CheckCurlPipeBash detects unverified remote script execution patterns such as
+// curl|bash, wget|sh, bash <(curl), Invoke-Expression DownloadString, and
+// deno run -A https:// (FG-015).
+func CheckCurlPipeBash(wf *Workflow) []Finding {
+	var findings []Finding
+
+	for _, job := range wf.Jobs {
+		for _, step := range job.Steps {
+			if step.Run == "" {
+				continue
+			}
+			lines := strings.Split(step.Run, "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if line == "" || strings.HasPrefix(line, "#") {
+					continue
+				}
+
+				matched := false
+				detail := ""
+
+				if curlPipeBashPattern.MatchString(line) {
+					matched = true
+					detail = "curl/wget piped to shell"
+				} else if bashProcessSubPattern.MatchString(line) {
+					matched = true
+					detail = "bash process substitution with curl/wget"
+				} else if invokeExprPattern.MatchString(line) {
+					matched = true
+					detail = "PowerShell Invoke-Expression with DownloadString"
+				} else if denoRunHTTPPattern.MatchString(line) {
+					matched = true
+					detail = "deno run -A with remote HTTPS URL"
+				}
+
+				if !matched {
+					continue
+				}
+
+				severity := SeverityMedium
+				if commitPinnedURLPattern.MatchString(line) {
+					severity = SeverityInfo
+					detail += " (commit-pinned URL)"
+				}
+
+				findings = append(findings, Finding{
+					RuleID:   "FG-015",
+					Severity: severity,
+					File:     wf.Path,
+					Line:     step.Line,
+					Message: fmt.Sprintf(
+						"Unverified Script Execution: %s (line %d)",
+						detail, step.Line),
+					Details: "Fetching and executing remote scripts without integrity verification " +
+						"allows man-in-the-middle or upstream compromise to inject arbitrary code. " +
+						"Pin to a specific commit SHA or verify a checksum before execution.",
+				})
+			}
+		}
+	}
+	return findings
+}
+
+// CheckLocalActionUntrustedCheckout detects uses: ./ (local composite actions) after
+// a checkout of fork code on external triggers, meaning the attacker controls
+// the action.yml and all action code (FG-016).
+func CheckLocalActionUntrustedCheckout(wf *Workflow) []Finding {
+	if !wf.On.PullRequestTarget && !wf.On.IssueComment && !wf.On.WorkflowRun {
+		return nil
+	}
+
+	var findings []Finding
+	for jobName, job := range wf.Jobs {
+		checkoutIdx := -1
+		for i, step := range job.Steps {
+			if isCheckoutAction(step.Uses) && refPointsToPRHead(step.With["ref"]) {
+				checkoutIdx = i
+				break
+			}
+			// Also detect git-fetch based checkouts
+			if step.Run != "" && runFetchesPRHead(step.Run) {
+				checkoutIdx = i
+				break
+			}
+		}
+		if checkoutIdx == -1 {
+			continue
+		}
+
+		// Look for uses: ./ in steps after the checkout
+		for _, step := range job.Steps[checkoutIdx+1:] {
+			if strings.HasPrefix(step.Uses, "./") {
+				findings = append(findings, Finding{
+					RuleID:   "FG-016",
+					Severity: SeverityCritical,
+					File:     wf.Path,
+					Line:     step.Line,
+					Message: fmt.Sprintf(
+						"Local Action After Untrusted Checkout: job '%s' uses local action '%s' "+
+							"after checking out fork code — attacker controls action.yml",
+						jobName, step.Uses),
+					Details: "Local composite actions (uses: ./) are loaded from the checked-out " +
+						"code. When preceded by a checkout of fork/PR head code, the attacker controls " +
+						"the entire action definition including action.yml, scripts, and Dockerfiles. " +
+						"This bypasses all step-level security controls.",
+				})
+			}
+		}
+	}
+	return findings
+}
+
+// CheckGitHubScriptInjection detects attacker-controllable expressions inside
+// actions/github-script with.script fields — JavaScript injection (FG-017).
+// This is distinct from FG-002 which only checks run: blocks.
+func CheckGitHubScriptInjection(wf *Workflow) []Finding {
+	dangerousExpressions := []string{
+		"github.event.issue.title",
+		"github.event.issue.body",
+		"github.event.pull_request.title",
+		"github.event.pull_request.body",
+		"github.event.comment.body",
+		"github.event.review.body",
+		"github.event.pages.*.page_name",
+		"github.event.commits.*.message",
+		"github.event.head_commit.message",
+		"github.head_ref",
+		"github.event.workflow_run.head_branch",
+		"github.event.inputs.",
+		"inputs.",
+	}
+
+	var findings []Finding
+	for _, job := range wf.Jobs {
+		for _, step := range job.Steps {
+			if step.Uses == "" {
+				continue
+			}
+			actionName := step.Uses
+			if idx := strings.Index(actionName, "@"); idx != -1 {
+				actionName = actionName[:idx]
+			}
+			if actionName != "actions/github-script" {
+				continue
+			}
+			script, ok := step.With["script"]
+			if !ok || script == "" {
+				continue
+			}
+
+			for _, expr := range dangerousExpressions {
+				if containsExpression(script, expr) {
+					findings = append(findings, Finding{
+						RuleID:   "FG-017",
+						Severity: SeverityHigh,
+						File:     wf.Path,
+						Line:     step.Line,
+						Message: fmt.Sprintf(
+							"GitHub Script Injection: %s in actions/github-script (line %d) — "+
+								"JavaScript injection via attacker-controlled expression",
+							expr, step.Line),
+						Details: "actions/github-script executes JavaScript. When attacker-controlled " +
+							"expressions like PR titles or comment bodies are interpolated into the " +
+							"script via ${{ }}, an attacker can inject arbitrary JavaScript that runs " +
+							"with the workflow's GITHUB_TOKEN permissions.",
+					})
+				}
+			}
+		}
+	}
+	return findings
 }
