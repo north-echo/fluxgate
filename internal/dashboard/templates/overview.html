@@ -50,6 +50,56 @@
 </table>
 {{end}}
 
+{{if .TopRepos}}
+<h2>Top 10 Repos by Findings</h2>
+<table>
+    <thead>
+        <tr>
+            <th>#</th>
+            <th>Repository</th>
+            <th>Findings</th>
+            <th>Workflows</th>
+            <th>Stars</th>
+        </tr>
+    </thead>
+    <tbody>
+        {{range $i, $repo := .TopRepos}}
+        <tr>
+            <td>{{add $i 1}}</td>
+            <td><a href="/repos/{{$repo.Owner}}/{{$repo.Name}}">{{$repo.Owner}}/{{$repo.Name}}</a></td>
+            <td>{{$repo.FindingsCount}}</td>
+            <td>{{$repo.WorkflowsCount}}</td>
+            <td>{{$repo.Stars}}</td>
+        </tr>
+        {{end}}
+    </tbody>
+</table>
+{{end}}
+
+{{if .RuleDistribution}}
+<h2>Rule Distribution</h2>
+<table>
+    <thead>
+        <tr>
+            <th>Rule</th>
+            <th>Count</th>
+            <th>%</th>
+            <th>Distribution</th>
+        </tr>
+    </thead>
+    <tbody>
+        {{range .RuleDistribution}}
+        <tr>
+            <td><a href="/findings?rule={{.RuleID}}">{{.RuleID}}</a></td>
+            <td>{{.Count}}</td>
+            <td>{{.Percent}}%</td>
+            <td style="font-family: monospace;">{{range seq .Percent}}#{{end}}</td>
+        </tr>
+        {{end}}
+    </tbody>
+</table>
+{{end}}
+
 {{if .DisclosureStats.Total}}
 <h2>Disclosure Status</h2>
 <div class="stats-cards">

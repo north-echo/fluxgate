@@ -49,9 +49,11 @@ func (c *Client) FetchTopRepos(ctx context.Context, top int) ([]RepoInfo, error)
 			},
 		}
 
-		result, err := withRetry(ctx, func(ctx context.Context) (*gh.RepositoriesSearchResult, *gh.Response, error) {
-			result, resp, err := c.gh.Search.Repositories(ctx, "stars:>1000", searchOpts)
-			return result, resp, err
+		result, err := withRetryRotate(ctx, c, func() retryableFunc[*gh.RepositoriesSearchResult] {
+			return func(ctx context.Context) (*gh.RepositoriesSearchResult, *gh.Response, error) {
+				result, resp, err := c.gh.Search.Repositories(ctx, "stars:>1000", searchOpts)
+				return result, resp, err
+			}
 		})
 		if err != nil {
 			return repos, fmt.Errorf("searching repos (page %d): %w", page, err)
