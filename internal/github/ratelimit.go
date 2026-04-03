@@ -86,3 +86,42 @@ func withRetry[T any](ctx context.Context, fn retryableFunc[T]) (T, error) {
 	}
 	return zero, fmt.Errorf("exceeded maximum retries")
 }
+
+// withRetryRotate wraps a GitHub API call with retry logic that also
+// rotates tokens when rate limited. The fnFactory is called each attempt
+// so it can use the current (possibly rotated) client.
+func withRetryRotate[T any](ctx context.Context, c *Client, fnFactory func() retryableFunc[T]) (T, error) {
+	var zero T
+	tokensExhausted := 0
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		fn := fnFactory()
+		result, resp, err := fn(ctx)
+		if err == nil {
+			return result, nil
+		}
+		if !isRetryable(resp, err) || attempt == maxRetries {
+			return zero, err
+		}
+
+		// Try rotating to another token before backing off
+		if isRateLimited(err) && c.rotateToken() {
+			tokensExhausted++
+			if tokensExhausted < c.tokenCount() {
+				fmt.Printf("  Rate limited, rotating to next token (%d/%d)...\n", tokensExhausted+1, c.tokenCount())
+				continue // retry immediately with new token
+			}
+			// All tokens exhausted, fall through to backoff
+			tokensExhausted = 0
+		}
+
+		wait := backoffDuration(resp, attempt)
+		fmt.Printf("  Rate limited, waiting %s (attempt %d/%d)...\n", wait.Round(time.Second), attempt+1, maxRetries)
+
+		select {
+		case <-ctx.Done():
+			return zero, ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+	return zero, fmt.Errorf("exceeded maximum retries")
+}

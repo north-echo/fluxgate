@@ -48,9 +48,11 @@ func (c *Client) DiscoverRepos(ctx context.Context, opts DiscoverOptions) ([]Rep
 			},
 		}
 
-		result, err := withRetry(ctx, func(ctx context.Context) (*gh.CodeSearchResult, *gh.Response, error) {
-			result, resp, err := c.gh.Search.Code(ctx, query, searchOpts)
-			return result, resp, err
+		result, err := withRetryRotate(ctx, c, func() retryableFunc[*gh.CodeSearchResult] {
+			return func(ctx context.Context) (*gh.CodeSearchResult, *gh.Response, error) {
+				result, resp, err := c.gh.Search.Code(ctx, query, searchOpts)
+				return result, resp, err
+			}
 		})
 		if err != nil {
 			return repos, fmt.Errorf("code search (page %d): %w", page, err)
@@ -72,9 +74,11 @@ func (c *Client) DiscoverRepos(ctx context.Context, opts DiscoverOptions) ([]Rep
 			// Code search results often have zero/stale star counts.
 			// If filtering by stars, fetch accurate repo info.
 			if opts.MinStars > 0 {
-				fullRepo, err := withRetry(ctx, func(ctx context.Context) (*gh.Repository, *gh.Response, error) {
-					r, resp, err := c.gh.Repositories.Get(ctx, owner, name)
-					return r, resp, err
+				fullRepo, err := withRetryRotate(ctx, c, func() retryableFunc[*gh.Repository] {
+					return func(ctx context.Context) (*gh.Repository, *gh.Response, error) {
+						r, resp, err := c.gh.Repositories.Get(ctx, owner, name)
+						return r, resp, err
+					}
 				})
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "  Warning: could not fetch repo info for %s: %v\n", key, err)

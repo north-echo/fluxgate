@@ -2,10 +2,10 @@
 <h1>Findings <small>({{.Total}} total)</small></h1>
 
 <div class="filters">
-    <form hx-get="/findings" hx-target="#findings-table" hx-push-url="true">
+    <form id="filter-form" hx-get="/findings" hx-target="#findings-table" hx-push-url="true">
         <label>
             Severity
-            <select name="severity" onchange="this.form.requestSubmit()">
+            <select name="severity" onchange="this.form.requestSubmit(); updateExportLink();">
                 <option value="">All</option>
                 <option value="critical" {{if eq .Severity "critical"}}selected{{end}}>Critical</option>
                 <option value="high" {{if eq .Severity "high"}}selected{{end}}>High</option>
@@ -16,15 +16,30 @@
         </label>
         <label>
             Rule
-            <input type="text" name="rule" value="{{.Rule}}" placeholder="e.g. FG-001" onchange="this.form.requestSubmit()">
+            <input type="text" name="rule" value="{{.Rule}}" placeholder="e.g. FG-001" onchange="this.form.requestSubmit(); updateExportLink();">
         </label>
         <label>
             Org
-            <input type="text" name="owner" value="{{.Owner}}" placeholder="e.g. acme-corp" onchange="this.form.requestSubmit()">
+            <input type="text" name="owner" value="{{.Owner}}" placeholder="e.g. acme-corp" onchange="this.form.requestSubmit(); updateExportLink();">
         </label>
     </form>
-    <a href="/findings/export.csv?severity={{.Severity}}&rule={{.Rule}}&owner={{.Owner}}" class="btn btn-export">Export CSV</a>
+    <a id="export-link" href="/findings/export.csv?severity={{.Severity}}&rule={{.Rule}}&owner={{.Owner}}" class="btn btn-export">Export CSV</a>
 </div>
+
+<script>
+function updateExportLink() {
+    var form = document.getElementById('filter-form');
+    var severity = form.querySelector('[name=severity]').value;
+    var rule = form.querySelector('[name=rule]').value;
+    var owner = form.querySelector('[name=owner]').value;
+    var db = new URLSearchParams(window.location.search).get('db') || '';
+    var link = '/findings/export.csv?severity=' + severity + '&rule=' + rule + '&owner=' + owner;
+    if (db) link += '&db=' + db;
+    document.getElementById('export-link').href = link;
+}
+// Update on page load in case filters are pre-set from URL
+updateExportLink();
+</script>
 
 <div id="findings-table">
     {{template "findings-table" .}}

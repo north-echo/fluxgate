@@ -2,9 +2,14 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -41,6 +46,8 @@ func main() {
 	rootCmd.AddCommand(newDiffCmd())
 	rootCmd.AddCommand(newMergeCmd())
 	rootCmd.AddCommand(newExportCmd())
+	rootCmd.AddCommand(newCacheCmd())
+	rootCmd.AddCommand(newSARIFPushCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -178,6 +185,7 @@ func newBatchCmd() *cobra.Command {
 		delay      time.Duration
 		reportPath string
 		token      string
+		tokens     string
 		severities string
 		rules      string
 	)
@@ -202,11 +210,21 @@ func newBatchCmd() *cobra.Command {
 				return generateReport(db, reportPath)
 			}
 
-			if token == "" {
-				token = os.Getenv("GITHUB_TOKEN")
+			// Build client with token rotation support
+			var client *ghclient.Client
+			if tokens != "" {
+				tokenList := strings.Split(tokens, ",")
+				for i := range tokenList {
+					tokenList[i] = strings.TrimSpace(tokenList[i])
+				}
+				client = ghclient.NewClientWithTokens(tokenList)
+				fmt.Printf("Using %d PATs with rotation\n", len(tokenList))
+			} else {
+				if token == "" {
+					token = os.Getenv("GITHUB_TOKEN")
+				}
+				client = ghclient.NewClient(token)
 			}
-
-			client := ghclient.NewClient(token)
 			ctx := context.Background()
 
 			var repos []ghclient.RepoInfo
@@ -254,6 +272,7 @@ func newBatchCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&resume, "resume", false, "Skip repos already in the database")
 	cmd.Flags().StringVar(&reportPath, "report", "", "Generate markdown report to this path")
 	cmd.Flags().StringVarP(&token, "token", "t", "", "GitHub token (default: $GITHUB_TOKEN)")
+	cmd.Flags().StringVar(&tokens, "tokens", "", "Comma-separated GitHub tokens for PAT rotation")
 	cmd.Flags().StringVar(&severities, "severity", "", "Filter by severity (comma-separated)")
 	cmd.Flags().StringVar(&rules, "rules", "", "Filter by rule ID (comma-separated)")
 	cmd.Flags().DurationVar(&delay, "delay", 0, "Delay between repos to avoid rate limits (e.g. 1s, 500ms)")
@@ -881,6 +900,191 @@ func newDisclosurePatchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&releaseTag, "release", "", "Release tag with fix")
 	cmd.Flags().StringVar(&dbPath, "db", "findings.db", "Database path")
 	cmd.MarkFlagRequired("disclosure-id")
+	return cmd
+}
+
+func newCacheCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "cache",
+		Short: "Manage the no-workflow cache",
+	}
+	cmd.AddCommand(newCacheStatsCmd())
+	cmd.AddCommand(newCacheClearCmd())
+	return cmd
+}
+
+func newCacheStatsCmd() *cobra.Command {
+	var dbPath string
+
+	cmd := &cobra.Command{
+		Use:   "stats",
+		Short: "Show cache statistics",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			db, err := store.Open(dbPath)
+			if err != nil {
+				return fmt.Errorf("opening database: %w", err)
+			}
+			defer db.Close()
+
+			total, expired := db.NoWorkflowsCacheStats()
+
+			fmt.Printf("No-workflow cache statistics:\n")
+			fmt.Printf("  Total cached repos:        %d\n", total)
+			fmt.Printf("  Expired entries (>7 days):  %d\n", expired)
+			fmt.Printf("  Active entries:             %d\n", total-expired)
+			fmt.Printf("  Est. API calls saved/scan:  %d\n", total-expired)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&dbPath, "db", "findings.db", "Database path")
+	return cmd
+}
+
+func newCacheClearCmd() *cobra.Command {
+	var dbPath string
+	var maxAge int
+
+	cmd := &cobra.Command{
+		Use:   "clear",
+		Short: "Clear expired entries from the no-workflow cache",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			db, err := store.Open(dbPath)
+			if err != nil {
+				return fmt.Errorf("opening database: %w", err)
+			}
+			defer db.Close()
+
+			cleared, err := db.ClearExpiredNoWorkflows(maxAge)
+			if err != nil {
+				return fmt.Errorf("clearing cache: %w", err)
+			}
+
+			fmt.Printf("Cleared %d expired cache entries (older than %d days)\n", cleared, maxAge)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&dbPath, "db", "findings.db", "Database path")
+	cmd.Flags().IntVar(&maxAge, "max-age", 7, "Maximum cache age in days")
+	return cmd
+}
+
+func newSARIFPushCmd() *cobra.Command {
+	var (
+		dbPath string
+		repo   string
+		token  string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "sarif-push",
+		Short: "Upload SARIF results to GitHub Code Scanning",
+		Long:  "Query findings for a repo from the database, generate SARIF, and upload to GitHub Code Scanning API.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			parts := strings.SplitN(repo, "/", 2)
+			if len(parts) != 2 {
+				return fmt.Errorf("invalid repo format: use owner/repo")
+			}
+			owner, name := parts[0], parts[1]
+
+			if token == "" {
+				token = os.Getenv("GITHUB_TOKEN")
+			}
+			if token == "" {
+				return fmt.Errorf("GitHub token required (--token or $GITHUB_TOKEN)")
+			}
+
+			db, err := store.Open(dbPath)
+			if err != nil {
+				return fmt.Errorf("opening database: %w", err)
+			}
+			defer db.Close()
+
+			// Query findings for this repo
+			records, err := db.GetFindingsForRepo(owner, name)
+			if err != nil {
+				return fmt.Errorf("querying findings: %w", err)
+			}
+			if len(records) == 0 {
+				fmt.Printf("No findings for %s/%s\n", owner, name)
+				return nil
+			}
+
+			// Convert FindingRecords back to scanner.Finding
+			var findings []scanner.Finding
+			for _, r := range records {
+				findings = append(findings, scanner.Finding{
+					RuleID:   r.RuleID,
+					Severity: r.Severity,
+					File:     r.WorkflowPath,
+					Line:     r.LineNumber,
+					Message:  r.Description,
+					Details:  r.Details,
+				})
+			}
+
+			result := &scanner.ScanResult{
+				Path:      fmt.Sprintf("%s/%s", owner, name),
+				Workflows: len(records),
+				Findings:  findings,
+			}
+
+			// Generate SARIF to buffer
+			var sarifBuf bytes.Buffer
+			if err := report.WriteSARIF(&sarifBuf, result); err != nil {
+				return fmt.Errorf("generating SARIF: %w", err)
+			}
+
+			// Gzip + base64 encode (required by GitHub)
+			var gzBuf bytes.Buffer
+			gz := gzip.NewWriter(&gzBuf)
+			if _, err := gz.Write(sarifBuf.Bytes()); err != nil {
+				return fmt.Errorf("gzip compress: %w", err)
+			}
+			if err := gz.Close(); err != nil {
+				return fmt.Errorf("gzip close: %w", err)
+			}
+			encoded := base64.StdEncoding.EncodeToString(gzBuf.Bytes())
+
+			// Upload to GitHub Code Scanning API
+			payload := map[string]string{
+				"commit_sha": "HEAD",
+				"ref":        "refs/heads/main",
+				"sarif":      encoded,
+			}
+			payloadBytes, _ := json.Marshal(payload)
+
+			url := fmt.Sprintf("https://api.github.com/repos/%s/%s/code-scanning/sarifs", owner, name)
+			req, err := http.NewRequest("POST", url, bytes.NewReader(payloadBytes))
+			if err != nil {
+				return fmt.Errorf("creating request: %w", err)
+			}
+			req.Header.Set("Accept", "application/vnd.github+json")
+			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return fmt.Errorf("uploading SARIF: %w", err)
+			}
+			defer resp.Body.Close()
+
+			body, _ := io.ReadAll(resp.Body)
+
+			if resp.StatusCode >= 300 {
+				return fmt.Errorf("GitHub API error (%d): %s", resp.StatusCode, string(body))
+			}
+
+			fmt.Printf("SARIF uploaded for %s/%s (%d findings)\n", owner, name, len(findings))
+			fmt.Printf("Response: %s\n", string(body))
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&dbPath, "db", "findings.db", "Database path")
+	cmd.Flags().StringVar(&repo, "repo", "", "Repository (owner/repo)")
+	cmd.Flags().StringVarP(&token, "token", "t", "", "GitHub token (default: $GITHUB_TOKEN)")
+	cmd.MarkFlagRequired("repo")
 	return cmd
 }
 

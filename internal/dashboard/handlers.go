@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/north-echo/fluxgate/internal/store"
 )
@@ -16,6 +17,15 @@ type overviewData struct {
 	HeatmapOrgs     []string
 	Severities      []string
 	DisclosureStats *store.DisclosureStats
+	TopRepos        []store.Repo
+	RuleDistribution []ruleBar
+}
+
+// ruleBar holds a rule's count and its percentage for the distribution bar.
+type ruleBar struct {
+	RuleID  string
+	Count   int
+	Percent int
 }
 
 // findingsData holds template data for the findings page.
@@ -82,12 +92,35 @@ func (s *Server) overviewHandler(w http.ResponseWriter, r *http.Request) {
 		discStats = &store.DisclosureStats{}
 	}
 
+	topRepos, err := db.GetTopRepos(10)
+	if err != nil {
+		topRepos = nil
+	}
+
+	// Build rule distribution bars
+	var ruleBars []ruleBar
+	if stats.TotalFindings > 0 {
+		for rule, count := range stats.ByRule {
+			pct := count * 100 / stats.TotalFindings
+			if pct < 1 {
+				pct = 1
+			}
+			ruleBars = append(ruleBars, ruleBar{
+				RuleID:  rule,
+				Count:   count,
+				Percent: pct,
+			})
+		}
+	}
+
 	data := overviewData{
-		Stats:           stats,
-		Heatmap:         heatmap,
-		HeatmapOrgs:     orgs,
-		Severities:      []string{"critical", "high", "medium", "low", "info"},
-		DisclosureStats: discStats,
+		Stats:            stats,
+		Heatmap:          heatmap,
+		HeatmapOrgs:      orgs,
+		Severities:       []string{"critical", "high", "medium", "low", "info"},
+		DisclosureStats:  discStats,
+		TopRepos:         topRepos,
+		RuleDistribution: ruleBars,
 	}
 
 	s.renderPage(w, r, "overview", data)
@@ -171,16 +204,29 @@ func (s *Server) findingsExportHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Build descriptive filename
+	filename := "fluxgate-findings"
+	if severity != "" {
+		filename += "-" + severity
+	}
+	if owner != "" {
+		filename += "-" + owner
+	}
+	filename += ".csv"
+
 	w.Header().Set("Content-Type", "text/csv")
-	w.Header().Set("Content-Disposition", "attachment; filename=fluxgate-findings.csv")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s", filename))
 
 	cw := csv.NewWriter(w)
 	cw.Write([]string{"Severity", "Rule", "Owner", "Repo", "Workflow", "Line", "Description", "Details"})
 	for _, f := range findings {
+		// Sanitize newlines in description/details for cleaner CSV
+		desc := strings.ReplaceAll(f.Description, "\n", " ")
+		details := strings.ReplaceAll(f.Details, "\n", " ")
 		cw.Write([]string{
 			f.Severity, f.RuleID, f.Owner, f.RepoName,
 			f.WorkflowPath, fmt.Sprintf("%d", f.LineNumber),
-			f.Description, f.Details,
+			desc, details,
 		})
 	}
 	cw.Flush()

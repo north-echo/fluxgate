@@ -520,3 +520,40 @@ func (d *DB) NoWorkflowsCacheStats() (total int, expired int) {
 	d.db.Get(&expired, "SELECT COUNT(*) FROM no_workflows WHERE checked_at < datetime('now', '-7 days')")
 	return
 }
+
+// ClearExpiredNoWorkflows deletes cache entries older than maxAgeDays and returns count deleted.
+func (d *DB) ClearExpiredNoWorkflows(maxAgeDays int) (int, error) {
+	res, err := d.db.Exec(
+		"DELETE FROM no_workflows WHERE checked_at < datetime('now', ?)",
+		fmt.Sprintf("-%d days", maxAgeDays))
+	if err != nil {
+		return 0, err
+	}
+	count, _ := res.RowsAffected()
+	return int(count), nil
+}
+
+// GetTopRepos returns the top repos ordered by findings_count descending.
+func (d *DB) GetTopRepos(limit int) ([]Repo, error) {
+	var repos []Repo
+	err := d.db.Select(&repos, `
+		SELECT * FROM repos
+		WHERE findings_count > 0
+		ORDER BY findings_count DESC
+		LIMIT ?`, limit)
+	return repos, err
+}
+
+// GetFindingsForRepo returns all findings for a given owner/name.
+func (d *DB) GetFindingsForRepo(owner, name string) ([]FindingRecord, error) {
+	var findings []FindingRecord
+	err := d.db.Select(&findings, `
+		SELECT f.* FROM findings f
+		JOIN repos r ON r.id = f.repo_id
+		WHERE r.owner = ? AND r.name = ?
+		ORDER BY CASE f.severity
+			WHEN 'critical' THEN 0 WHEN 'high' THEN 1
+			WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END`,
+		owner, name)
+	return findings, err
+}
