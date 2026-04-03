@@ -1,0 +1,18 @@
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: docker-build
+spec:
+  steps:
+    - name: build-image
+      image: docker:20.10
+      securityContext:
+        privileged: true
+      script: |
+        docker build -t myimage .
+    - name: run-as-root
+      image: alpine:3.18
+      securityContext:
+        runAsUser: 0
+      script: |
+        echo "running as root"

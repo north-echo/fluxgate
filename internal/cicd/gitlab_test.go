@@ -147,6 +147,137 @@ func TestGitLabIncludes_Parsed(t *testing.T) {
 	}
 }
 
+func TestGitLabBroadPermissions(t *testing.T) {
+	pipeline := loadGitLabFixture(t, "gitlab-broad-permissions.yml")
+	findings := ScanGitLabPipeline(pipeline)
+
+	var gl004 []GitLabFinding
+	for _, f := range findings {
+		if f.RuleID == "GL-004" {
+			gl004 = append(gl004, f)
+		}
+	}
+
+	if len(gl004) == 0 {
+		t.Fatal("expected GL-004 finding for CI_JOB_TOKEN without scoped permissions")
+	}
+	if gl004[0].Severity != severityMedium {
+		t.Errorf("expected medium severity, got %s", gl004[0].Severity)
+	}
+	if !strings.Contains(gl004[0].Message, "deploy") {
+		t.Error("expected message to reference job name 'deploy'")
+	}
+}
+
+func TestGitLabSecretsInLogs(t *testing.T) {
+	pipeline := loadGitLabFixture(t, "gitlab-secrets-in-logs.yml")
+	findings := ScanGitLabPipeline(pipeline)
+
+	var gl005 []GitLabFinding
+	for _, f := range findings {
+		if f.RuleID == "GL-005" {
+			gl005 = append(gl005, f)
+		}
+	}
+
+	if len(gl005) == 0 {
+		t.Fatal("expected GL-005 finding for echo of $SECRET_TOKEN")
+	}
+	if gl005[0].Severity != severityLow {
+		t.Errorf("expected low severity, got %s", gl005[0].Severity)
+	}
+}
+
+func TestGitLabSecretsInLogs_SafeEcho(t *testing.T) {
+	yamlContent := `
+stages:
+  - test
+
+test:
+  stage: test
+  script:
+    - echo "Running tests"
+    - echo "$CI_PROJECT_NAME"
+`
+	pipeline, err := ParseGitLabCI([]byte(yamlContent), "test.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings := ScanGitLabPipeline(pipeline)
+
+	for _, f := range findings {
+		if f.RuleID == "GL-005" {
+			t.Errorf("unexpected GL-005 finding for safe echo: %s", f.Message)
+		}
+	}
+}
+
+func TestGitLabForkMRExec(t *testing.T) {
+	pipeline := loadGitLabFixture(t, "gitlab-fork-mr-exec.yml")
+	findings := ScanGitLabPipeline(pipeline)
+
+	var gl006 []GitLabFinding
+	for _, f := range findings {
+		if f.RuleID == "GL-006" {
+			gl006 = append(gl006, f)
+		}
+	}
+
+	if len(gl006) == 0 {
+		t.Fatal("expected GL-006 finding for fork MR execution")
+	}
+	if gl006[0].Severity != severityHigh {
+		t.Errorf("expected high severity (checkout + build commands), got %s", gl006[0].Severity)
+	}
+	if !strings.Contains(gl006[0].Message, "build commands") {
+		t.Error("expected message to mention build commands")
+	}
+}
+
+func TestGitLabOIDCMisconfig(t *testing.T) {
+	pipeline := loadGitLabFixture(t, "gitlab-oidc-misconfig.yml")
+	findings := ScanGitLabPipeline(pipeline)
+
+	var gl008 []GitLabFinding
+	for _, f := range findings {
+		if f.RuleID == "GL-008" {
+			gl008 = append(gl008, f)
+		}
+	}
+
+	if len(gl008) == 0 {
+		t.Fatal("expected GL-008 finding for id_tokens on MR pipeline")
+	}
+	if gl008[0].Severity != severityHigh {
+		t.Errorf("expected high severity, got %s", gl008[0].Severity)
+	}
+	if !strings.Contains(gl008[0].Message, "AWS_TOKEN") {
+		t.Error("expected message to reference token name 'AWS_TOKEN'")
+	}
+}
+
+func TestGitLabCachePoisoning(t *testing.T) {
+	pipeline := loadGitLabFixture(t, "gitlab-cache-poisoning.yml")
+	findings := ScanGitLabPipeline(pipeline)
+
+	var gl010 []GitLabFinding
+	for _, f := range findings {
+		if f.RuleID == "GL-010" {
+			gl010 = append(gl010, f)
+		}
+	}
+
+	if len(gl010) == 0 {
+		t.Fatal("expected GL-010 finding for shared cache key on MR pipeline")
+	}
+	if gl010[0].Severity != severityMedium {
+		t.Errorf("expected medium severity, got %s", gl010[0].Severity)
+	}
+	if !strings.Contains(gl010[0].Message, "CI_COMMIT_REF_SLUG") {
+		t.Error("expected message to reference cache key pattern")
+	}
+}
+
 // TestGitLabScriptInjection_MappingNode verifies GL-002 detects script injection
 // even when YAML parses unquoted script lines as mapping nodes (due to ": " in
 // the command, e.g. `echo "MR: $CI_MERGE_REQUEST_TITLE"`).

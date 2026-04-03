@@ -1,0 +1,14 @@
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: unpinned-pipeline
+spec:
+  tasks:
+    - name: lint
+      taskRef:
+        name: golangci-lint
+        bundle: gcr.io/tekton-releases/catalog/upstream/golangci-lint:0.2
+    - name: build
+      taskRef:
+        name: golang-build
+        bundle: gcr.io/tekton-releases/catalog/upstream/golang-build@sha256:abc123def456

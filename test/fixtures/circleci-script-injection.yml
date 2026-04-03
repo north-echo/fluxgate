@@ -1,0 +1,17 @@
+version: 2.1
+
+jobs:
+  label:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - run:
+          name: Print branch info
+          command: |
+            echo "Branch: $CIRCLE_BRANCH"
+            echo "PR Author: $CIRCLE_PR_USERNAME"
+
+workflows:
+  ci:
+    jobs:
+      - label

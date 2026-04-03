@@ -74,6 +74,42 @@ func ScanDirectory(dir string, opts ScanOptions) (*ScanResult, error) {
 		}
 	}
 
+	// Scan Jenkinsfile if it exists
+	jenkinsPath := filepath.Join(dir, "Jenkinsfile")
+	if data, err := os.ReadFile(jenkinsPath); err == nil {
+		jkFindings := ScanJenkinsfile(data, jenkinsPath, opts)
+		result.Workflows++
+		result.Findings = append(result.Findings, jkFindings...)
+	}
+
+	// Scan Tekton pipelines/tasks in .tekton/ directory
+	tektonDir := filepath.Join(dir, ".tekton")
+	if entries, err := os.ReadDir(tektonDir); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			if !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml") {
+				continue
+			}
+			tkPath := filepath.Join(tektonDir, name)
+			if data, err := os.ReadFile(tkPath); err == nil {
+				tkFindings := ScanTektonPipeline(data, tkPath, opts)
+				result.Workflows++
+				result.Findings = append(result.Findings, tkFindings...)
+			}
+		}
+	}
+
+	// Scan CircleCI if .circleci/config.yml exists
+	circleciPath := filepath.Join(dir, ".circleci", "config.yml")
+	if data, err := os.ReadFile(circleciPath); err == nil {
+		ccFindings := ScanCircleCI(data, circleciPath, opts)
+		result.Workflows++
+		result.Findings = append(result.Findings, ccFindings...)
+	}
+
 	if result.Workflows == 0 {
 		return nil, os.ErrNotExist
 	}
@@ -252,6 +288,88 @@ func ScanAzurePipelines(data []byte, path string, opts ScanOptions) []Finding {
 		findings = filtered
 	}
 
+	return findings
+}
+
+// ScanJenkinsfile parses and scans a Jenkinsfile.
+func ScanJenkinsfile(data []byte, path string, opts ScanOptions) []Finding {
+	pipeline, err := cicd.ParseJenkinsfile(data, path)
+	if err != nil {
+		return nil
+	}
+	jkFindings := cicd.ScanJenkinsPipeline(pipeline)
+	var findings []Finding
+	for _, f := range jkFindings {
+		findings = append(findings, Finding{
+			RuleID: f.RuleID, Severity: f.Severity, File: f.File,
+			Line: f.Line, Message: f.Message, Details: f.Details,
+		})
+	}
+	return filterFindings(findings, opts)
+}
+
+// ScanTektonPipeline parses and scans a Tekton Pipeline/Task YAML.
+func ScanTektonPipeline(data []byte, path string, opts ScanOptions) []Finding {
+	pipeline, err := cicd.ParseTektonPipeline(data, path)
+	if err != nil {
+		return nil
+	}
+	tkFindings := cicd.ScanTektonPipeline(pipeline)
+	var findings []Finding
+	for _, f := range tkFindings {
+		findings = append(findings, Finding{
+			RuleID: f.RuleID, Severity: f.Severity, File: f.File,
+			Line: f.Line, Message: f.Message, Details: f.Details,
+		})
+	}
+	return filterFindings(findings, opts)
+}
+
+// ScanCircleCI parses and scans a .circleci/config.yml.
+func ScanCircleCI(data []byte, path string, opts ScanOptions) []Finding {
+	pipeline, err := cicd.ParseCircleCI(data, path)
+	if err != nil {
+		return nil
+	}
+	ccFindings := cicd.ScanCircleCIPipeline(pipeline)
+	var findings []Finding
+	for _, f := range ccFindings {
+		findings = append(findings, Finding{
+			RuleID: f.RuleID, Severity: f.Severity, File: f.File,
+			Line: f.Line, Message: f.Message, Details: f.Details,
+		})
+	}
+	return filterFindings(findings, opts)
+}
+
+// filterFindings applies severity and rule filters to a finding list.
+func filterFindings(findings []Finding, opts ScanOptions) []Finding {
+	if len(opts.Severities) > 0 {
+		sevSet := make(map[string]bool)
+		for _, s := range opts.Severities {
+			sevSet[strings.ToLower(s)] = true
+		}
+		var filtered []Finding
+		for _, f := range findings {
+			if sevSet[f.Severity] {
+				filtered = append(filtered, f)
+			}
+		}
+		findings = filtered
+	}
+	if len(opts.Rules) > 0 {
+		ruleSet := make(map[string]bool)
+		for _, r := range opts.Rules {
+			ruleSet[r] = true
+		}
+		var filtered []Finding
+		for _, f := range findings {
+			if ruleSet[f.RuleID] {
+				filtered = append(filtered, f)
+			}
+		}
+		findings = filtered
+	}
 	return findings
 }
 

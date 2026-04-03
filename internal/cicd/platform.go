@@ -61,6 +61,8 @@ type PipelineJob struct {
 	DependsOn   []string  // Job dependencies
 	Secrets     []string  // Secret references
 	Permissions map[string]string
+	IdTokens    map[string]string // OIDC id_tokens (audience -> token name)
+	CacheKeys   []string          // Cache key patterns
 }
 
 // PipelineStep represents a single step/script block in a job.

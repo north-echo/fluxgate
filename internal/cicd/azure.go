@@ -419,11 +419,13 @@ func convertAzureStep(raw *rawAzureStep) []PipelineStep {
 		})
 	}
 	if raw.Task != "" {
+		// Merge Env and Inputs for task steps so rules can inspect both
+		taskEnv := mergeStringMaps(raw.Env, raw.Inputs)
 		steps = append(steps, PipelineStep{
 			Name:    raw.DisplayName,
 			Type:    StepAction,
 			Command: raw.Task,
-			Env:     raw.Env,
+			Env:     taskEnv,
 		})
 	}
 	if raw.Template != "" {
@@ -494,4 +496,20 @@ func extractAzureSecretRefs(node *yaml.Node) []string {
 		}
 	}
 	return secrets
+}
+
+// mergeStringMaps merges two string maps, with b values overriding a values.
+// Returns nil if both inputs are nil/empty.
+func mergeStringMaps(a, b map[string]string) map[string]string {
+	if len(a) == 0 && len(b) == 0 {
+		return nil
+	}
+	result := make(map[string]string)
+	for k, v := range a {
+		result[k] = v
+	}
+	for k, v := range b {
+		result[k] = v
+	}
+	return result
 }
