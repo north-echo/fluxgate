@@ -1,0 +1,29 @@
+name: If Always True Test
+on:
+  pull_request_target:
+    types: [opened]
+jobs:
+  broken-guard:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository }} && true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - run: make build
+  multi-expr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check with broken if
+        if: ${{ github.actor == 'dependabot[bot]' }} ${{ github.event_name == 'pull_request_target' }}
+        run: echo "multi expression block"
+  safe-job:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+    steps:
+      - run: echo "this is fine"
+  bare-expr-job:
+    runs-on: ubuntu-latest
+    if: github.actor == 'dependabot[bot]'
+    steps:
+      - run: echo "bare expression is also fine"

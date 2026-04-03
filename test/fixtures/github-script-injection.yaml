@@ -1,0 +1,23 @@
+name: GitHub Script Injection Test
+on:
+  issue_comment:
+jobs:
+  respond:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Greet commenter
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = `${{ github.event.comment.body }}`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `Thanks for the comment: ${body}`
+            });
+      - name: Safe step
+        uses: actions/github-script@v7
+        with:
+          script: |
+            console.log("Hello from safe script");
