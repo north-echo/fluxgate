@@ -61,6 +61,8 @@ type rawGitLabJob struct {
 	Variables   map[string]string `yaml:"variables"`
 	Needs       []string          `yaml:"needs"`
 	Services    yaml.Node         `yaml:"services"`
+	IdTokens    yaml.Node         `yaml:"id_tokens"`
+	Cache       yaml.Node         `yaml:"cache"`
 }
 
 // Reserved GitLab CI keywords that are NOT job names.
@@ -228,6 +230,12 @@ func convertGitLabJob(name string, raw *rawGitLabJob, node *yaml.Node) PipelineJ
 		}
 	}
 
+	// Extract id_tokens
+	job.IdTokens = parseGitLabIdTokens(&raw.IdTokens)
+
+	// Extract cache keys
+	job.CacheKeys = parseGitLabCacheKeys(&raw.Cache)
+
 	return job
 }
 
@@ -343,4 +351,76 @@ func parseGitLabIncludeItem(node *yaml.Node) GitLabInclude {
 		}
 	}
 	return inc
+}
+
+// parseGitLabIdTokens extracts id_tokens from a job's id_tokens YAML node.
+// id_tokens is a mapping: { TOKEN_NAME: { aud: "..." }, ... }
+func parseGitLabIdTokens(node *yaml.Node) map[string]string {
+	if node == nil || node.Kind == 0 {
+		return nil
+	}
+	if node.Kind != yaml.MappingNode {
+		return nil
+	}
+
+	tokens := make(map[string]string)
+	for i := 0; i < len(node.Content)-1; i += 2 {
+		tokenName := node.Content[i].Value
+		audNode := node.Content[i+1]
+		aud := ""
+		if audNode.Kind == yaml.MappingNode {
+			for j := 0; j < len(audNode.Content)-1; j += 2 {
+				if audNode.Content[j].Value == "aud" {
+					aud = audNode.Content[j+1].Value
+				}
+			}
+		}
+		tokens[tokenName] = aud
+	}
+	return tokens
+}
+
+// parseGitLabCacheKeys extracts cache key patterns from a job's cache YAML node.
+// cache can be a single mapping or a sequence of mappings.
+func parseGitLabCacheKeys(node *yaml.Node) []string {
+	if node == nil || node.Kind == 0 {
+		return nil
+	}
+
+	var keys []string
+	switch node.Kind {
+	case yaml.MappingNode:
+		keys = append(keys, extractCacheKey(node)...)
+	case yaml.SequenceNode:
+		for _, item := range node.Content {
+			if item.Kind == yaml.MappingNode {
+				keys = append(keys, extractCacheKey(item)...)
+			}
+		}
+	}
+	return keys
+}
+
+func extractCacheKey(node *yaml.Node) []string {
+	if node.Kind != yaml.MappingNode {
+		return nil
+	}
+	var keys []string
+	for i := 0; i < len(node.Content)-1; i += 2 {
+		if node.Content[i].Value == "key" {
+			valNode := node.Content[i+1]
+			switch valNode.Kind {
+			case yaml.ScalarNode:
+				keys = append(keys, valNode.Value)
+			case yaml.MappingNode:
+				// key: { files: [...], prefix: "..." }
+				for j := 0; j < len(valNode.Content)-1; j += 2 {
+					if valNode.Content[j].Value == "prefix" {
+						keys = append(keys, valNode.Content[j+1].Value)
+					}
+				}
+			}
+		}
+	}
+	return keys
 }

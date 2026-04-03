@@ -237,6 +237,206 @@ steps:
 	}
 }
 
+func TestAzureBroadPermissions(t *testing.T) {
+	yaml := `
+trigger:
+  - main
+pr:
+  - main
+pool:
+  vmImage: 'ubuntu-latest'
+steps:
+  - task: AzureCLI@2
+    displayName: Deploy
+    inputs:
+      azureSubscription: my-subscription
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: az webapp deploy
+`
+	p, err := ParseAzurePipeline([]byte(yaml), "azure-pipelines.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings := ScanAzurePipeline(p)
+
+	var az004 []AzureFinding
+	for _, f := range findings {
+		if f.RuleID == "AZ-004" {
+			az004 = append(az004, f)
+		}
+	}
+	if len(az004) == 0 {
+		t.Fatal("expected AZ-004 finding for broad azureSubscription")
+	}
+	if az004[0].Severity != severityMedium {
+		t.Errorf("expected medium severity, got %s", az004[0].Severity)
+	}
+}
+
+func TestAzureSecretsInLogs(t *testing.T) {
+	yaml := `
+trigger:
+  - main
+pool:
+  vmImage: 'ubuntu-latest'
+steps:
+  - script: echo "Token is $(secret_token)"
+    displayName: Debug
+`
+	p, err := ParseAzurePipeline([]byte(yaml), "azure-pipelines.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings := ScanAzurePipeline(p)
+
+	var az005 []AzureFinding
+	for _, f := range findings {
+		if f.RuleID == "AZ-005" {
+			az005 = append(az005, f)
+		}
+	}
+	if len(az005) == 0 {
+		t.Fatal("expected AZ-005 finding for echo of $(secret_token)")
+	}
+	if az005[0].Severity != severityLow {
+		t.Errorf("expected low severity, got %s", az005[0].Severity)
+	}
+}
+
+func TestAzureSecretsInLogs_Safe(t *testing.T) {
+	yaml := `
+trigger:
+  - main
+pool:
+  vmImage: 'ubuntu-latest'
+steps:
+  - script: echo "Build number $(Build.BuildNumber)"
+    displayName: Show build
+`
+	p, err := ParseAzurePipeline([]byte(yaml), "azure-pipelines.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings := ScanAzurePipeline(p)
+
+	for _, f := range findings {
+		if f.RuleID == "AZ-005" {
+			t.Errorf("unexpected AZ-005 finding for safe echo: %s", f.Message)
+		}
+	}
+}
+
+func TestAzureForkSecrets(t *testing.T) {
+	yaml := `
+trigger:
+  - main
+pr:
+  - main
+pool:
+  vmImage: 'ubuntu-latest'
+variables:
+  - group: production-secrets
+jobs:
+  - job: Build
+    variables:
+      - group: build-secrets
+    steps:
+      - script: make build
+`
+	p, err := ParseAzurePipeline([]byte(yaml), "azure-pipelines.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings := ScanAzurePipeline(p)
+
+	var az006 []AzureFinding
+	for _, f := range findings {
+		if f.RuleID == "AZ-006" {
+			az006 = append(az006, f)
+		}
+	}
+	if len(az006) == 0 {
+		t.Fatal("expected AZ-006 finding for fork secrets")
+	}
+	if az006[0].Severity != severityHigh {
+		t.Errorf("expected high severity, got %s", az006[0].Severity)
+	}
+}
+
+func TestAzureOIDCMisconfig(t *testing.T) {
+	yaml := `
+trigger:
+  - main
+pr:
+  - main
+pool:
+  vmImage: 'ubuntu-latest'
+steps:
+  - task: AzureCLI@2
+    displayName: Deploy with OIDC
+    inputs:
+      azureSubscription: my-oidc-connection
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: az account show
+`
+	p, err := ParseAzurePipeline([]byte(yaml), "azure-pipelines.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings := ScanAzurePipeline(p)
+
+	var az008 []AzureFinding
+	for _, f := range findings {
+		if f.RuleID == "AZ-008" {
+			az008 = append(az008, f)
+		}
+	}
+	if len(az008) == 0 {
+		t.Fatal("expected AZ-008 finding for OIDC on PR pipeline")
+	}
+	if az008[0].Severity != severityHigh {
+		t.Errorf("expected high severity, got %s", az008[0].Severity)
+	}
+}
+
+func TestAzureCachePoisoning(t *testing.T) {
+	yaml := `
+trigger:
+  - main
+pr:
+  - main
+pool:
+  vmImage: 'ubuntu-latest'
+steps:
+  - task: Cache@2
+    displayName: Cache npm
+    inputs:
+      key: npm | $(Agent.OS) | package-lock.json
+      path: $(npm_config_cache)
+  - script: npm ci
+`
+	p, err := ParseAzurePipeline([]byte(yaml), "azure-pipelines.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings := ScanAzurePipeline(p)
+
+	var az010 []AzureFinding
+	for _, f := range findings {
+		if f.RuleID == "AZ-010" {
+			az010 = append(az010, f)
+		}
+	}
+	if len(az010) == 0 {
+		t.Fatal("expected AZ-010 finding for Cache@2 on PR pipeline")
+	}
+	if az010[0].Severity != severityMedium {
+		t.Errorf("expected medium severity, got %s", az010[0].Severity)
+	}
+}
+
 func TestAzureSelfHosted_DeploymentProtection(t *testing.T) {
 	yaml := `
 trigger:

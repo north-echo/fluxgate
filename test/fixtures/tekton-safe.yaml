@@ -1,0 +1,14 @@
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: safe-build
+spec:
+  steps:
+    - name: build
+      image: golang:1.21
+      script: |
+        go build ./...
+    - name: test
+      image: golang:1.21
+      script: |
+        go test ./...

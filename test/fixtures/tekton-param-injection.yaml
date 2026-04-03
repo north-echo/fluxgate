@@ -1,0 +1,16 @@
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: greet-task
+spec:
+  params:
+    - name: pr-title
+      type: string
+    - name: branch-name
+      type: string
+  steps:
+    - name: greet
+      image: alpine:3.18
+      script: |
+        echo "Building PR: $(params.pr-title)"
+        echo "Branch: $(params.branch-name)"

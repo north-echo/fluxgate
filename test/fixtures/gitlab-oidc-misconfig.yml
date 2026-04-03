@@ -1,0 +1,12 @@
+stages:
+  - deploy
+
+deploy_aws:
+  stage: deploy
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+  id_tokens:
+    AWS_TOKEN:
+      aud: "https://gitlab.com"
+  script:
+    - echo "Deploying with OIDC"

@@ -30,7 +30,12 @@ func ScanGitLabPipeline(pipeline *GitLabPipeline) []GitLabFinding {
 	findings = append(findings, checkGitLabMRSecrets(pipeline)...)
 	findings = append(findings, checkGitLabScriptInjection(pipeline)...)
 	findings = append(findings, checkGitLabUnsafeIncludes(pipeline)...)
+	findings = append(findings, checkGitLabBroadPermissions(pipeline)...)
+	findings = append(findings, checkGitLabSecretsInLogs(pipeline)...)
+	findings = append(findings, checkGitLabForkMRExec(pipeline)...)
+	findings = append(findings, checkGitLabOIDCMisconfig(pipeline)...)
 	findings = append(findings, checkGitLabSelfHostedRunner(pipeline)...)
+	findings = append(findings, checkGitLabCachePoisoning(pipeline)...)
 	return findings
 }
 
@@ -242,6 +247,336 @@ func checkGitLabSelfHostedRunner(pipeline *GitLabPipeline) []GitLabFinding {
 					job.Name),
 				Details: "Shell executors on self-hosted runners execute commands directly on the host. Fork MR authors can execute arbitrary commands on the runner machine, risking credential theft and lateral movement.",
 			})
+		}
+	}
+	return findings
+}
+
+// checkGitLabBroadPermissions detects overly permissive CI_JOB_TOKEN scope.
+// Jobs that access CI_JOB_TOKEN without restricting token scope may grant
+// broader access than intended (GL-004).
+func checkGitLabBroadPermissions(pipeline *GitLabPipeline) []GitLabFinding {
+	var findings []GitLabFinding
+
+	for _, job := range pipeline.Jobs() {
+		usesJobToken := false
+		accessesSecrets := false
+
+		// Check if job references CI_JOB_TOKEN in script steps
+		for _, step := range job.Steps {
+			if step.Type != StepScript {
+				continue
+			}
+			if strings.Contains(step.Command, "CI_JOB_TOKEN") {
+				usesJobToken = true
+			}
+		}
+
+		// Check if job references CI_JOB_TOKEN in secrets/variables
+		for _, secret := range job.Secrets {
+			if strings.Contains(secret, "CI_JOB_TOKEN") {
+				usesJobToken = true
+			}
+			if strings.HasPrefix(secret, "$") {
+				accessesSecrets = true
+			}
+		}
+
+		if !usesJobToken {
+			continue
+		}
+
+		// Check if the job has any scoping (permissions restrictions)
+		// GitLab scoped tokens use the `id_tokens` or `secrets` blocks
+		// with restricted scope. A bare CI_JOB_TOKEN usage without
+		// explicit permission scoping is overly broad.
+		hasScoping := false
+		if job.Permissions != nil {
+			if _, ok := job.Permissions["ci_job_token"]; ok {
+				hasScoping = true
+			}
+		}
+
+		if !hasScoping {
+			msg := fmt.Sprintf("GitLab Broad Permissions: job '%s' uses CI_JOB_TOKEN without scoped permissions", job.Name)
+			if accessesSecrets {
+				msg += " and accesses additional secrets"
+			}
+			findings = append(findings, GitLabFinding{
+				RuleID:   "GL-004",
+				Severity: severityMedium,
+				File:     pipeline.FilePath(),
+				Message:  msg,
+				Details:  "CI_JOB_TOKEN provides API access scoped to the project. Without restricting token permissions via CI/CD settings, the token may have broader access than intended. Consider using id_tokens with restricted audience or limiting CI_JOB_TOKEN scope in project settings.",
+			})
+		}
+	}
+	return findings
+}
+
+// checkGitLabSecretsInLogs detects echo of secret-like CI variables in script
+// steps. Patterns like `echo $CI_*` or `echo $SECRET_*` where the variable
+// name suggests it holds sensitive data (GL-005).
+func checkGitLabSecretsInLogs(pipeline *GitLabPipeline) []GitLabFinding {
+	sensitivePatterns := []string{"SECRET", "TOKEN", "KEY", "PASSWORD", "CREDENTIALS"}
+
+	var findings []GitLabFinding
+	for _, job := range pipeline.Jobs() {
+		for _, step := range job.Steps {
+			if step.Type != StepScript {
+				continue
+			}
+			cmd := step.Command
+			// Look for echo/printf statements containing secret-like variables
+			lower := strings.ToLower(cmd)
+			if !strings.Contains(lower, "echo ") && !strings.Contains(lower, "echo\t") &&
+				!strings.Contains(lower, "printf ") && !strings.Contains(lower, "printf\t") {
+				continue
+			}
+
+			// Check for variable patterns that look sensitive
+			for _, pattern := range sensitivePatterns {
+				if containsSensitiveVar(cmd, pattern) {
+					findings = append(findings, GitLabFinding{
+						RuleID:   "GL-005",
+						Severity: severityLow,
+						File:     pipeline.FilePath(),
+						Line:     step.Line,
+						Message: fmt.Sprintf(
+							"GitLab Secrets in Logs: job '%s' may echo a sensitive variable containing '%s'",
+							job.Name, pattern),
+						Details: "Echoing CI variables that contain secrets, tokens, or credentials to the build log can expose sensitive data. GitLab masks variables marked as 'protected' or 'masked', but custom variables or CI_JOB_TOKEN may still be leaked.",
+					})
+					break // One finding per step
+				}
+			}
+		}
+	}
+	return findings
+}
+
+// containsSensitiveVar checks if a command string contains a variable reference
+// (like $FOO_TOKEN or ${FOO_TOKEN}) where the variable name contains the given pattern.
+func containsSensitiveVar(cmd string, pattern string) bool {
+	upper := strings.ToUpper(cmd)
+	patternUpper := strings.ToUpper(pattern)
+
+	// Look for $VARNAME or ${VARNAME} patterns
+	for i := 0; i < len(upper)-1; i++ {
+		if upper[i] != '$' {
+			continue
+		}
+		// Extract variable name
+		start := i + 1
+		if start < len(upper) && upper[start] == '{' {
+			start++
+			end := strings.Index(upper[start:], "}")
+			if end > 0 {
+				varName := upper[start : start+end]
+				if strings.Contains(varName, patternUpper) {
+					return true
+				}
+			}
+		} else {
+			// Bare $VARNAME - extract until non-alphanumeric/underscore
+			end := start
+			for end < len(upper) && (upper[end] == '_' || (upper[end] >= 'A' && upper[end] <= 'Z') || (upper[end] >= '0' && upper[end] <= '9')) {
+				end++
+			}
+			if end > start {
+				varName := upper[start:end]
+				if strings.Contains(varName, patternUpper) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// checkGitLabForkMRExec detects merge_request_event pipelines that check out
+// the MR source branch and run build commands, enabling fork code execution (GL-006).
+func checkGitLabForkMRExec(pipeline *GitLabPipeline) []GitLabFinding {
+	var findings []GitLabFinding
+
+	for _, job := range pipeline.Jobs() {
+		runsOnMR := false
+		for _, cond := range job.Conditions {
+			lower := strings.ToLower(cond)
+			if strings.Contains(lower, "ci_pipeline_source") &&
+				strings.Contains(lower, "merge_request_event") {
+				runsOnMR = true
+				break
+			}
+		}
+		if !runsOnMR {
+			continue
+		}
+
+		// Check for explicit checkout of MR source branch
+		checksOutMRSource := false
+		for _, step := range job.Steps {
+			if step.Type != StepScript {
+				continue
+			}
+			cmd := strings.ToLower(step.Command)
+			if (strings.Contains(cmd, "git checkout") || strings.Contains(cmd, "git fetch") || strings.Contains(cmd, "git merge")) &&
+				(strings.Contains(cmd, "ci_merge_request_source_branch") ||
+					strings.Contains(cmd, "merge_request_source_branch_name") ||
+					strings.Contains(cmd, "$ci_merge_request_ref_path")) {
+				checksOutMRSource = true
+				break
+			}
+		}
+
+		if !checksOutMRSource {
+			continue
+		}
+
+		// Check for build commands after checkout
+		hasBuildCmd := false
+		for _, step := range job.Steps {
+			if step.Type != StepScript {
+				continue
+			}
+			cmd := strings.ToLower(step.Command)
+			buildCmds := []string{
+				"pip install", "npm install", "npm ci", "yarn install",
+				"make", "cargo build", "go build", "mvn", "gradle",
+				"./", "bash ", "sh ", "python ", "node ", "bundle install",
+				"composer install",
+			}
+			for _, bc := range buildCmds {
+				if strings.Contains(cmd, bc) {
+					hasBuildCmd = true
+					break
+				}
+			}
+		}
+
+		severity := severityMedium
+		msg := fmt.Sprintf("GitLab Fork MR Execution: job '%s' checks out MR source on merge_request_event", job.Name)
+		if hasBuildCmd {
+			severity = severityHigh
+			msg += " and runs build commands — fork code may be executed"
+		}
+
+		findings = append(findings, GitLabFinding{
+			RuleID:   "GL-006",
+			Severity: severity,
+			File:     pipeline.FilePath(),
+			Message:  msg,
+			Details:  "Checking out the merge request source branch in a merge_request_event pipeline and running build commands allows fork authors to execute arbitrary code in the parent project context. This can lead to secret exfiltration and supply chain attacks.",
+		})
+	}
+	return findings
+}
+
+// checkGitLabOIDCMisconfig detects id_tokens blocks in jobs on merge_request_event
+// pipelines with broad audience values (GL-008).
+func checkGitLabOIDCMisconfig(pipeline *GitLabPipeline) []GitLabFinding {
+	var findings []GitLabFinding
+
+	for _, job := range pipeline.Jobs() {
+		if len(job.IdTokens) == 0 {
+			continue
+		}
+
+		runsOnMR := false
+		for _, cond := range job.Conditions {
+			lower := strings.ToLower(cond)
+			if strings.Contains(lower, "ci_pipeline_source") &&
+				strings.Contains(lower, "merge_request_event") {
+				runsOnMR = true
+				break
+			}
+		}
+
+		if !runsOnMR {
+			continue
+		}
+
+		for tokenName, aud := range job.IdTokens {
+			msg := fmt.Sprintf("GitLab OIDC Misconfiguration: job '%s' issues id_token '%s' on merge_request_event pipeline",
+				job.Name, tokenName)
+
+			severity := severityHigh
+			if aud != "" {
+				// Check for overly broad audience
+				broadAuds := []string{"*", "https://gitlab.com", "https://gitlab.example.com"}
+				isBroad := false
+				for _, ba := range broadAuds {
+					if strings.EqualFold(aud, ba) {
+						isBroad = true
+						break
+					}
+				}
+				if isBroad {
+					msg += fmt.Sprintf(" with broad audience '%s'", aud)
+				} else {
+					msg += fmt.Sprintf(" (audience: '%s')", aud)
+				}
+			} else {
+				msg += " with no audience restriction"
+			}
+
+			findings = append(findings, GitLabFinding{
+				RuleID:   "GL-008",
+				Severity: severity,
+				File:     pipeline.FilePath(),
+				Message:  msg,
+				Details:  "OIDC id_tokens on merge_request_event pipelines may be issued to fork MR authors. This can allow attackers to federate into cloud providers (AWS, GCP, Azure) using the project's identity. Restrict id_tokens to trusted pipeline sources only.",
+			})
+		}
+	}
+	return findings
+}
+
+// checkGitLabCachePoisoning detects shared cache keys on merge_request_event
+// pipelines that could be poisoned by fork MR authors (GL-010).
+func checkGitLabCachePoisoning(pipeline *GitLabPipeline) []GitLabFinding {
+	var findings []GitLabFinding
+
+	for _, job := range pipeline.Jobs() {
+		if len(job.CacheKeys) == 0 {
+			continue
+		}
+
+		runsOnMR := false
+		for _, cond := range job.Conditions {
+			lower := strings.ToLower(cond)
+			if strings.Contains(lower, "ci_pipeline_source") &&
+				strings.Contains(lower, "merge_request_event") {
+				runsOnMR = true
+				break
+			}
+		}
+
+		if !runsOnMR {
+			continue
+		}
+
+		for _, key := range job.CacheKeys {
+			// Predictable/shared cache keys are especially dangerous
+			isPredictable := strings.Contains(key, "${CI_COMMIT_REF_SLUG}") ||
+				strings.Contains(key, "$CI_COMMIT_REF_SLUG") ||
+				strings.Contains(key, "${CI_DEFAULT_BRANCH}") ||
+				strings.Contains(key, "$CI_DEFAULT_BRANCH") ||
+				strings.Contains(key, "${CI_PROJECT_ID}") ||
+				strings.Contains(key, "$CI_PROJECT_ID") ||
+				!strings.Contains(key, "$") // static key shared across branches
+
+			if isPredictable {
+				findings = append(findings, GitLabFinding{
+					RuleID:   "GL-010",
+					Severity: severityMedium,
+					File:     pipeline.FilePath(),
+					Message: fmt.Sprintf(
+						"GitLab Cache Poisoning: job '%s' uses shared cache key '%s' on merge_request_event pipeline",
+						job.Name, key),
+					Details: "Shared or predictable cache keys on merge_request_event pipelines allow fork MR authors to poison the cache. Subsequent builds on the default branch may execute poisoned cached artifacts. Use per-MR cache keys or disable caching for MR pipelines.",
+				})
+			}
 		}
 	}
 	return findings

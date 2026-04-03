@@ -1,0 +1,25 @@
+version: 2.1
+
+orbs:
+  node: circleci/node@sha256:abcdef1234567890
+
+jobs:
+  build:
+    docker:
+      - image: cimg/node:18.17
+    steps:
+      - checkout
+      - run:
+          name: Install deps
+          command: npm ci
+      - run:
+          name: Test
+          command: npm test
+
+workflows:
+  main:
+    jobs:
+      - build:
+          filters:
+            branches:
+              only: main
