@@ -1,0 +1,38 @@
+name: Cross-Step Output Taint Test
+on:
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Capture PR title
+        id: capture
+        run: |
+          echo "title=${{ github.event.pull_request.title }}" >> $GITHUB_OUTPUT
+
+      - name: Use tainted output
+        run: |
+          echo "Processing: ${{ steps.capture.outputs.title }}"
+
+  safe-job:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set safe output
+        id: safe
+        run: |
+          echo "version=1.2.3" >> $GITHUB_OUTPUT
+
+      - name: Use safe output
+        run: |
+          echo "Version: ${{ steps.safe.outputs.version }}"
+
+  no-id-job:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Capture without id
+        run: |
+          echo "title=${{ github.event.pull_request.title }}" >> $GITHUB_OUTPUT
+
+      - name: Cannot reference without id
+        run: |
+          echo "This step has no taint ref"

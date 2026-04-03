@@ -68,8 +68,8 @@ jobs:
 
 func TestAllRules_Completeness(t *testing.T) {
 	rules := AllRules()
-	if len(rules) < 17 {
-		t.Errorf("expected at least 17 rules (FG-001 through FG-017), got %d", len(rules))
+	if len(rules) < 23 {
+		t.Errorf("expected at least 23 rules (FG-001 through FG-023), got %d", len(rules))
 	}
 	// Every rule should have a description
 	for id := range rules {

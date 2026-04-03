@@ -1,0 +1,18 @@
+name: Known Vulnerable Action Test
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # Vulnerable version of tj-actions/changed-files (high severity)
+      - uses: tj-actions/changed-files@v44
+      # Vulnerable version of actions/checkout
+      - uses: actions/checkout@v4.1.0
+      # Fixed version — should NOT flag
+      - uses: actions/checkout@v4.2.0
+      # Above fixed version — should NOT flag
+      - uses: tj-actions/changed-files@v45.0.1
+      # SHA-pinned — should NOT flag (can't determine version)
+      - uses: tj-actions/changed-files@a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2
+      # Vulnerable docker/build-push-action
+      - uses: docker/build-push-action@v4.1.0

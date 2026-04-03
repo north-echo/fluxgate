@@ -36,6 +36,12 @@ type PermissionsConfig struct {
 	Scopes   map[string]string
 }
 
+// ContainerConfig represents a job-level container or service container.
+type ContainerConfig struct {
+	Image       string
+	Credentials map[string]string // username, password
+}
+
 // Job represents a single job in a workflow.
 type Job struct {
 	Name        string
@@ -46,10 +52,13 @@ type Job struct {
 	Secrets     string   // "inherit" or empty
 	Needs       []string // job IDs this job depends on
 	RunsOn      []string // runner labels (e.g. ["ubuntu-latest"], ["self-hosted", "linux"])
+	Container   ContainerConfig
+	Services    map[string]ContainerConfig
 }
 
 // Step represents a single step in a job.
 type Step struct {
+	ID   string // step id for cross-step references
 	Name string
 	If   string // raw if: conditional
 	Uses string
@@ -68,17 +77,20 @@ type rawWorkflow struct {
 }
 
 type rawJob struct {
-	Name        string    `yaml:"name"`
-	If          string    `yaml:"if"`
-	Environment yaml.Node `yaml:"environment"`
-	Permissions yaml.Node `yaml:"permissions"`
-	Steps       []rawStep `yaml:"steps"`
-	Secrets     string    `yaml:"secrets"`
-	Needs       yaml.Node `yaml:"needs"`
-	RunsOn      yaml.Node `yaml:"runs-on"`
+	Name        string              `yaml:"name"`
+	If          string              `yaml:"if"`
+	Environment yaml.Node           `yaml:"environment"`
+	Permissions yaml.Node           `yaml:"permissions"`
+	Steps       []rawStep           `yaml:"steps"`
+	Secrets     string              `yaml:"secrets"`
+	Needs       yaml.Node           `yaml:"needs"`
+	RunsOn      yaml.Node           `yaml:"runs-on"`
+	Container   yaml.Node           `yaml:"container"`
+	Services    map[string]yaml.Node `yaml:"services"`
 }
 
 type rawStep struct {
+	ID   string            `yaml:"id"`
 	Name string            `yaml:"name"`
 	If   string            `yaml:"if"`
 	Uses string            `yaml:"uses"`
@@ -131,9 +143,12 @@ func ParseWorkflow(data []byte, path string) (*Workflow, error) {
 			Secrets:     rawJ.Secrets,
 			Needs:       parseNeeds(&rawJ.Needs),
 			RunsOn:      parseRunsOn(&rawJ.RunsOn),
+			Container:   parseContainer(&rawJ.Container),
+			Services:    parseServices(rawJ.Services),
 		}
 		for i, rawS := range rawJ.Steps {
 			step := Step{
+				ID:   rawS.ID,
 				Name: rawS.Name,
 				If:   rawS.If,
 				Uses: rawS.Uses,
@@ -380,6 +395,49 @@ func HasElevatedPermissions(wfPerms, jobPerms PermissionsConfig) bool {
 		}
 	}
 	return false
+}
+
+// parseContainer parses a job's container: field.
+// Handles both string form ("image:tag") and mapping form ({image: ..., credentials: ...}).
+func parseContainer(node *yaml.Node) ContainerConfig {
+	cc := ContainerConfig{}
+	if node == nil || node.Kind == 0 {
+		return cc
+	}
+	switch node.Kind {
+	case yaml.ScalarNode:
+		cc.Image = node.Value
+	case yaml.MappingNode:
+		cc.Credentials = make(map[string]string)
+		for i := 0; i < len(node.Content)-1; i += 2 {
+			key := node.Content[i].Value
+			val := node.Content[i+1]
+			switch key {
+			case "image":
+				cc.Image = val.Value
+			case "credentials":
+				if val.Kind == yaml.MappingNode {
+					for j := 0; j < len(val.Content)-1; j += 2 {
+						cc.Credentials[val.Content[j].Value] = val.Content[j+1].Value
+					}
+				}
+			}
+		}
+	}
+	return cc
+}
+
+// parseServices parses a job's services: field.
+func parseServices(nodes map[string]yaml.Node) map[string]ContainerConfig {
+	if len(nodes) == 0 {
+		return nil
+	}
+	services := make(map[string]ContainerConfig)
+	for name, node := range nodes {
+		n := node // avoid aliasing
+		services[name] = parseContainer(&n)
+	}
+	return services
 }
 
 // AccessesSecrets checks if any step in the job references secrets.

@@ -26,6 +26,12 @@ var CheckMissingPermsRisky = pkgscanner.CheckMissingPermsRisky
 var CheckCurlPipeBash = pkgscanner.CheckCurlPipeBash
 var CheckLocalActionUntrustedCheckout = pkgscanner.CheckLocalActionUntrustedCheckout
 var CheckGitHubScriptInjection = pkgscanner.CheckGitHubScriptInjection
+var CheckImpostorCommit = pkgscanner.CheckImpostorCommit
+var CheckHardcodedCredentials = pkgscanner.CheckHardcodedCredentials
+var CheckRefConfusion = pkgscanner.CheckRefConfusion
+var CheckCrossStepOutputTaint = pkgscanner.CheckCrossStepOutputTaint
+var CheckKnownVulnerableActions = pkgscanner.CheckKnownVulnerableActions
+var CheckArtifactCredentialLeak = pkgscanner.CheckArtifactCredentialLeak
 
 // Re-export types used in tests
 type MitigationAnalysis = pkgscanner.MitigationAnalysis
