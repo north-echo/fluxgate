@@ -1,0 +1,20 @@
+name: Ref Confusion Test
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # Standard semver tag — should NOT flag
+      - uses: some-org/action@v1
+      # Semver with patch — should NOT flag
+      - uses: some-org/action@v1.2.3
+      # SHA-pinned — should NOT flag
+      - uses: some-org/action@a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2
+      # Known branch (flagged by FG-003) — should NOT flag here
+      - uses: some-org/action@main
+      # Ambiguous ref — SHOULD flag
+      - uses: some-org/action@release/v1
+      # Another ambiguous ref — SHOULD flag
+      - uses: some-org/action@stable
+      # First-party action with ambiguous ref — should NOT flag
+      - uses: actions/checkout@release/v1

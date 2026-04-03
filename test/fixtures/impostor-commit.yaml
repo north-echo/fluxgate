@@ -1,0 +1,14 @@
+name: Impostor Commit Test
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # SHA-pinned to known-safe org — should NOT flag
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+      # SHA-pinned to unknown org — SHOULD flag
+      - uses: some-org/some-action@a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2
+      # Tag-pinned to unknown org — should NOT flag (not SHA)
+      - uses: some-org/some-action@v1
+      # SHA-pinned to another known-safe org — should NOT flag
+      - uses: hashicorp/setup-terraform@a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2

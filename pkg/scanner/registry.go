@@ -23,6 +23,12 @@ func AllRules() map[string]Rule {
 		"FG-015": CheckCurlPipeBash,
 		"FG-016": CheckLocalActionUntrustedCheckout,
 		"FG-017": CheckGitHubScriptInjection,
+		"FG-018": CheckImpostorCommit,
+		"FG-019": CheckHardcodedCredentials,
+		"FG-020": CheckRefConfusion,
+		"FG-021": CheckCrossStepOutputTaint,
+		"FG-022": CheckKnownVulnerableActions,
+		"FG-023": CheckArtifactCredentialLeak,
 	}
 }
 
@@ -45,4 +51,10 @@ var RuleDescriptions = map[string]string{
 	"FG-015": "Unverified Script Execution",
 	"FG-016": "Local Action After Untrusted Checkout",
 	"FG-017": "GitHub Script Injection",
+	"FG-018": "Impostor Commit",
+	"FG-019": "Hardcoded Container Credentials",
+	"FG-020": "Ref Confusion",
+	"FG-021": "Cross-Step Output Taint",
+	"FG-022": "Known Vulnerable Action",
+	"FG-023": "Artifact Credential Leak",
 }

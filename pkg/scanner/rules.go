@@ -3,6 +3,7 @@ package scanner
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -2111,6 +2112,551 @@ func CheckGitHubScriptInjection(wf *Workflow) []Finding {
 					})
 				}
 			}
+		}
+	}
+	return findings
+}
+
+// knownSafeOrgPrefixes lists GitHub org prefixes whose SHA-pinned actions
+// are trusted and do not need impostor commit verification.
+var knownSafeOrgPrefixes = []string{
+	"actions/",
+	"github/",
+	"hashicorp/",
+	"google-github-actions/",
+	"aws-actions/",
+	"azure/",
+	"docker/",
+}
+
+// CheckImpostorCommit flags actions pinned to SHAs from unknown orgs where
+// impostor commit attacks are possible (FG-018).
+func CheckImpostorCommit(wf *Workflow) []Finding {
+	var findings []Finding
+	for _, job := range wf.Jobs {
+		for _, step := range job.Steps {
+			if step.Uses == "" || !strings.Contains(step.Uses, "@") {
+				continue
+			}
+			parts := strings.SplitN(step.Uses, "@", 2)
+			action := parts[0]
+			ref := parts[1]
+
+			// Only flag SHA-pinned actions
+			if !shaPattern.MatchString(ref) {
+				continue
+			}
+
+			// Skip known-safe orgs
+			safe := false
+			for _, prefix := range knownSafeOrgPrefixes {
+				if strings.HasPrefix(action, prefix) {
+					safe = true
+					break
+				}
+			}
+			if safe {
+				continue
+			}
+
+			findings = append(findings, Finding{
+				RuleID:     "FG-018",
+				Severity:   SeverityInfo,
+				Confidence: ConfidencePatternOnly,
+				File:       wf.Path,
+				Line:       step.Line,
+				Message: fmt.Sprintf(
+					"Impostor Commit: %s pinned to SHA from unknown org — "+
+						"verify commit belongs to claimed repo (not a fork-network hijack)",
+					action),
+				Details: "Actions pinned to full SHA are generally safe, but the SHA must actually " +
+					"belong to the claimed repository. In GitHub's fork network, a commit SHA " +
+					"from any fork can be referenced as if it belongs to the parent repo. " +
+					"Use the GitHub API (GET /repos/OWNER/REPO/commits/SHA) to verify the " +
+					"commit exists in the claimed repository.",
+				Mitigations: []string{
+					"Verify the SHA belongs to the claimed repo via GitHub API",
+					"Use actions from well-known orgs (actions/*, github/*, etc.)",
+				},
+			})
+		}
+	}
+	return findings
+}
+
+// secretsRefPattern matches ${{ secrets.* }} references.
+var secretsRefPattern = regexp.MustCompile(`\$\{\{\s*secrets\.\w+\s*\}\}`)
+
+// CheckHardcodedCredentials detects hardcoded credentials in container and
+// services blocks (FG-019).
+func CheckHardcodedCredentials(wf *Workflow) []Finding {
+	var findings []Finding
+	for jobName, job := range wf.Jobs {
+		// Check job-level container
+		findings = append(findings, checkContainerCreds(wf.Path, jobName, "container", job.Container)...)
+
+		// Check services
+		for svcName, svc := range job.Services {
+			findings = append(findings, checkContainerCreds(wf.Path, jobName, "services."+svcName, svc)...)
+		}
+	}
+	return findings
+}
+
+func checkContainerCreds(file, jobName, block string, cc ContainerConfig) []Finding {
+	var findings []Finding
+
+	// Check for user:pass@ in image URL
+	if cc.Image != "" && strings.Contains(cc.Image, "@") {
+		// Distinguish user:pass@host from registry.example.com/image@sha256:...
+		atIdx := strings.Index(cc.Image, "@")
+		before := cc.Image[:atIdx]
+		if strings.Contains(before, ":") && !strings.HasPrefix(cc.Image[atIdx:], "@sha256:") {
+			findings = append(findings, Finding{
+				RuleID:   "FG-019",
+				Severity: SeverityHigh,
+				File:     file,
+				Line:     1,
+				Message: fmt.Sprintf(
+					"Hardcoded Container Credentials: job '%s' %s image URL contains embedded credentials",
+					jobName, block),
+				Details: "Container image references should not contain inline credentials. " +
+					"Use the credentials: block with secrets references instead.",
+			})
+		}
+	}
+
+	// Check credentials block
+	if len(cc.Credentials) == 0 {
+		return findings
+	}
+
+	username := cc.Credentials["username"]
+	password := cc.Credentials["password"]
+
+	if password == "" {
+		return findings
+	}
+
+	// Check if password is a secrets reference (safe pattern)
+	if secretsRefPattern.MatchString(password) {
+		return findings
+	}
+
+	// Literal password found
+	msg := fmt.Sprintf(
+		"Hardcoded Container Credentials: job '%s' %s has literal password in credentials block",
+		jobName, block)
+	if username != "" && !secretsRefPattern.MatchString(username) {
+		msg = fmt.Sprintf(
+			"Hardcoded Container Credentials: job '%s' %s has literal username and password in credentials block",
+			jobName, block)
+	}
+
+	findings = append(findings, Finding{
+		RuleID:   "FG-019",
+		Severity: SeverityHigh,
+		File:     file,
+		Line:     1,
+		Message:  msg,
+		Details: "Credentials in workflow files are visible to anyone with read access to the " +
+			"repository. Use ${{ secrets.* }} references for all authentication values.",
+		Mitigations: []string{
+			"Move credentials to GitHub Secrets",
+			"Use ${{ secrets.REGISTRY_USERNAME }} and ${{ secrets.REGISTRY_PASSWORD }}",
+		},
+	})
+	return findings
+}
+
+// semverRefPattern matches version-like refs: v1, v1.2, v1.2.3
+var semverRefPattern = regexp.MustCompile(`^v?\d+(\.\d+){0,2}$`)
+
+// knownBranchRefs are refs already flagged by FG-003 as branch pinning.
+var knownBranchRefs = map[string]bool{
+	"main": true, "master": true, "dev": true, "develop": true,
+}
+
+// CheckRefConfusion detects action references with ambiguous refs that could
+// be either tags or branches (FG-020).
+func CheckRefConfusion(wf *Workflow) []Finding {
+	var findings []Finding
+	for _, job := range wf.Jobs {
+		for _, step := range job.Steps {
+			if step.Uses == "" || !strings.Contains(step.Uses, "@") {
+				continue
+			}
+			parts := strings.SplitN(step.Uses, "@", 2)
+			action := parts[0]
+			ref := parts[1]
+
+			// Skip SHA-pinned
+			if shaPattern.MatchString(ref) {
+				continue
+			}
+			// Skip semver-like refs (standard tag pattern)
+			if semverRefPattern.MatchString(ref) {
+				continue
+			}
+			// Skip known branch names (already flagged by FG-003)
+			if knownBranchRefs[ref] {
+				continue
+			}
+			// Skip first-party actions (lower risk)
+			if strings.HasPrefix(action, "actions/") {
+				continue
+			}
+
+			findings = append(findings, Finding{
+				RuleID:   "FG-020",
+				Severity: SeverityMedium,
+				File:     wf.Path,
+				Line:     step.Line,
+				Message: fmt.Sprintf(
+					"Ref Confusion: %s@%s uses ambiguous ref (could be tag or branch)",
+					action, ref),
+				Details: "Refs like 'release/v1', 'stable', or other non-semver strings are " +
+					"ambiguous between tags and branches. An attacker who creates a branch " +
+					"with the same name as a tag (or vice versa) can hijack the resolution. " +
+					"Pin to a full SHA or use a semver tag (v1, v1.2.3).",
+				Mitigations: []string{
+					"Pin to a full 40-character commit SHA",
+					"Use a semver tag (e.g., v1, v1.2.3)",
+				},
+			})
+		}
+	}
+	return findings
+}
+
+// taintDangerousExpressions is the list of attacker-controlled expressions
+// used by FG-021 for cross-step taint tracking (same as FG-002).
+var taintDangerousExpressions = []string{
+	"github.event.issue.title",
+	"github.event.issue.body",
+	"github.event.pull_request.title",
+	"github.event.pull_request.body",
+	"github.event.comment.body",
+	"github.event.review.body",
+	"github.event.pages.*.page_name",
+	"github.event.commits.*.message",
+	"github.event.head_commit.message",
+	"github.head_ref",
+	"github.event.workflow_run.head_branch",
+	"github.event.inputs.",
+	"inputs.",
+}
+
+// outputSetPattern matches lines like: echo "name=value" >> $GITHUB_OUTPUT
+// and captures the output name.
+var outputSetPattern = regexp.MustCompile(
+	`echo\s+['"]?(\w+)=.*>>\s*"?\$GITHUB_OUTPUT"?`)
+
+// CheckCrossStepOutputTaint detects attacker-controlled expressions captured
+// into step outputs and later consumed in run blocks (FG-021).
+func CheckCrossStepOutputTaint(wf *Workflow) []Finding {
+	var findings []Finding
+	for _, job := range wf.Jobs {
+		// Phase 1: find steps that write dangerous expressions to GITHUB_OUTPUT
+		// Map: stepID -> outputName -> dangerous expression
+		type taintedOutput struct {
+			stepID   string
+			name     string
+			expr     string
+			stepLine int
+		}
+		var tainted []taintedOutput
+
+		for _, step := range job.Steps {
+			if step.Run == "" || step.ID == "" {
+				continue
+			}
+			// Check if run block writes to GITHUB_OUTPUT
+			if !strings.Contains(step.Run, "GITHUB_OUTPUT") {
+				continue
+			}
+			for _, line := range strings.Split(step.Run, "\n") {
+				line = strings.TrimSpace(line)
+				// Check if this line contains a dangerous expression
+				hasDangerous := false
+				var matchedExpr string
+				for _, expr := range taintDangerousExpressions {
+					if containsExpression(line, expr) {
+						hasDangerous = true
+						matchedExpr = expr
+						break
+					}
+				}
+				if !hasDangerous {
+					continue
+				}
+				// Extract the output name
+				matches := outputSetPattern.FindStringSubmatch(line)
+				if len(matches) < 2 {
+					continue
+				}
+				outputName := matches[1]
+				tainted = append(tainted, taintedOutput{
+					stepID:   step.ID,
+					name:     outputName,
+					expr:     matchedExpr,
+					stepLine: step.Line,
+				})
+			}
+		}
+
+		if len(tainted) == 0 {
+			continue
+		}
+
+		// Phase 2: check if any later step uses the tainted output in a run block
+		for _, step := range job.Steps {
+			if step.Run == "" {
+				continue
+			}
+			for _, t := range tainted {
+				ref := fmt.Sprintf("steps.%s.outputs.%s", t.stepID, t.name)
+				if containsExpression(step.Run, ref) {
+					findings = append(findings, Finding{
+						RuleID:   "FG-021",
+						Severity: SeverityHigh,
+						File:     wf.Path,
+						Line:     step.Line,
+						Message: fmt.Sprintf(
+							"Cross-Step Output Taint: step '%s' captures %s into output '%s', "+
+								"consumed in run block at line %d",
+							t.stepID, t.expr, t.name, step.Line),
+						Details: fmt.Sprintf(
+							"Step '%s' writes attacker-controlled expression %s to GITHUB_OUTPUT "+
+								"as '%s'. This tainted value is later interpolated into a run block "+
+								"via ${{ steps.%s.outputs.%s }}, enabling indirect script injection.",
+							t.stepID, t.expr, t.name, t.stepID, t.name),
+						Mitigations: []string{
+							"Pass the value through an environment variable instead of inline interpolation",
+							"Sanitize the output value before writing to GITHUB_OUTPUT",
+						},
+					})
+				}
+			}
+		}
+	}
+	return findings
+}
+
+// advisoryEntry describes a known security advisory for an action version.
+type advisoryEntry struct {
+	FixedVersion string
+	Advisory     string
+	Description  string
+	HighSeverity bool // true for supply chain compromises
+}
+
+// knownVulnerableActions maps action names to their known advisories.
+var knownVulnerableActions = map[string][]advisoryEntry{
+	"actions/checkout": {
+		{FixedVersion: "4.2.0", Advisory: "actions-checkout-credential-persistence", Description: "credential persistence", HighSeverity: false},
+	},
+	"hashicorp/vault-action": {
+		{FixedVersion: "2.2.0", Advisory: "CVE-2021-32074", Description: "secret exposure", HighSeverity: false},
+	},
+	"tj-actions/changed-files": {
+		{FixedVersion: "45.0.0", Advisory: "CVE-2025-30066", Description: "supply chain compromise", HighSeverity: true},
+	},
+	"docker/build-push-action": {
+		{FixedVersion: "4.2.0", Advisory: "credential leak", Description: "credential leak", HighSeverity: false},
+	},
+}
+
+// parseVersion extracts major, minor, patch from a version string like "v1.2.3", "v1.2", "v1", "1.2.3".
+func parseVersion(v string) (major, minor, patch int, ok bool) {
+	v = strings.TrimPrefix(v, "v")
+	parts := strings.SplitN(v, ".", 3)
+	if len(parts) == 0 {
+		return 0, 0, 0, false
+	}
+	var err error
+	major, err = strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	if len(parts) >= 2 {
+		minor, err = strconv.Atoi(parts[1])
+		if err != nil {
+			return major, 0, 0, true // ignore unparseable minor
+		}
+	}
+	if len(parts) >= 3 {
+		patch, err = strconv.Atoi(parts[2])
+		if err != nil {
+			return major, minor, 0, true
+		}
+	}
+	return major, minor, patch, true
+}
+
+// versionLessThan returns true if version a < version b using semver comparison.
+func versionLessThan(a, b string) bool {
+	aMaj, aMin, aPat, aOK := parseVersion(a)
+	bMaj, bMin, bPat, bOK := parseVersion(b)
+	if !aOK || !bOK {
+		return false
+	}
+	if aMaj != bMaj {
+		return aMaj < bMaj
+	}
+	if aMin != bMin {
+		return aMin < bMin
+	}
+	return aPat < bPat
+}
+
+// CheckKnownVulnerableActions detects actions pinned to versions with known
+// security advisories (FG-022).
+func CheckKnownVulnerableActions(wf *Workflow) []Finding {
+	var findings []Finding
+	for _, job := range wf.Jobs {
+		for _, step := range job.Steps {
+			if step.Uses == "" || !strings.Contains(step.Uses, "@") {
+				continue
+			}
+			parts := strings.SplitN(step.Uses, "@", 2)
+			action := parts[0]
+			ref := parts[1]
+
+			advisories, ok := knownVulnerableActions[action]
+			if !ok {
+				continue
+			}
+
+			// Skip SHA-pinned (can't determine version from SHA alone)
+			if shaPattern.MatchString(ref) {
+				continue
+			}
+
+			for _, adv := range advisories {
+				if versionLessThan(ref, adv.FixedVersion) {
+					severity := SeverityMedium
+					if adv.HighSeverity {
+						severity = SeverityHigh
+					}
+
+					desc := adv.Description
+					if desc == "" {
+						desc = "known vulnerability"
+					}
+
+					findings = append(findings, Finding{
+						RuleID:   "FG-022",
+						Severity: severity,
+						File:     wf.Path,
+						Line:     step.Line,
+						Message: fmt.Sprintf(
+							"Known Vulnerable Action: %s@%s has %s (%s, fixed in %s)",
+							action, ref, desc, adv.Advisory, adv.FixedVersion),
+						Details: fmt.Sprintf(
+							"Action %s at version %s is affected by %s (%s). "+
+								"Upgrade to version %s or later.",
+							action, ref, adv.Advisory, desc, adv.FixedVersion),
+						Mitigations: []string{
+							fmt.Sprintf("Upgrade to %s@v%s or later", action, adv.FixedVersion),
+							"Pin to the SHA of a fixed release",
+						},
+					})
+				}
+			}
+		}
+	}
+	return findings
+}
+
+// CheckArtifactCredentialLeak detects upload-artifact uploading paths that
+// may contain persisted credentials from checkout (FG-023).
+func CheckArtifactCredentialLeak(wf *Workflow) []Finding {
+	var findings []Finding
+	for _, job := range wf.Jobs {
+		// Determine if any checkout step has persist-credentials enabled (default is true)
+		persistCreds := false
+		persistExplicitlyFalse := false
+
+		for _, step := range job.Steps {
+			if !isCheckoutAction(step.Uses) {
+				continue
+			}
+			pc, set := step.With["persist-credentials"]
+			if !set {
+				persistCreds = true // default is true
+			} else if strings.EqualFold(pc, "true") {
+				persistCreds = true
+			} else if strings.EqualFold(pc, "false") {
+				persistExplicitlyFalse = true
+			}
+		}
+
+		for _, step := range job.Steps {
+			if step.Uses == "" {
+				continue
+			}
+			actionName := step.Uses
+			if idx := strings.Index(actionName, "@"); idx != -1 {
+				actionName = actionName[:idx]
+			}
+			if actionName != "actions/upload-artifact" {
+				continue
+			}
+
+			uploadPath := step.With["path"]
+			if uploadPath == "" {
+				continue
+			}
+
+			// Check for dangerous upload paths
+			isDangerous := false
+			reason := ""
+			if strings.Contains(uploadPath, ".git") {
+				isDangerous = true
+				reason = "uploads .git directory (may contain persisted credentials)"
+			} else if uploadPath == "." || uploadPath == "./" ||
+				uploadPath == "${{ github.workspace }}" ||
+				uploadPath == "${{github.workspace}}" {
+				isDangerous = true
+				reason = "uploads entire workspace (includes .git with persisted credentials)"
+			}
+
+			if !isDangerous {
+				continue
+			}
+
+			severity := SeverityMedium
+			details := fmt.Sprintf(
+				"actions/upload-artifact uploads '%s' which %s. ",
+				uploadPath, reason)
+
+			if persistExplicitlyFalse {
+				severity = SeverityInfo
+				details += "persist-credentials is set to false on checkout, reducing risk."
+			} else if persistCreds {
+				details += "actions/checkout has persist-credentials: true (the default), " +
+					"so the .git/config contains the GITHUB_TOKEN."
+			} else {
+				details += "No checkout step detected, but the .git directory may still " +
+					"contain credentials from a prior workflow step."
+			}
+
+			findings = append(findings, Finding{
+				RuleID:   "FG-023",
+				Severity: severity,
+				File:     wf.Path,
+				Line:     step.Line,
+				Message: fmt.Sprintf(
+					"Artifact Credential Leak: upload-artifact uploads '%s' — %s",
+					uploadPath, reason),
+				Details: details,
+				Mitigations: []string{
+					"Set persist-credentials: false on actions/checkout",
+					"Upload specific files/directories instead of the entire workspace",
+					"Exclude .git from upload paths",
+				},
+			})
 		}
 	}
 	return findings
