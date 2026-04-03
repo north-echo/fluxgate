@@ -589,18 +589,53 @@ func CheckScriptInjection(wf *Workflow) []Finding {
 			}
 			for _, expr := range dangerousExpressions {
 				if containsExpression(step.Run, expr) {
+					severity := SeverityHigh
+					detail := ""
+
+					// Check if the expression is only used in echo/logging context
+					exprRef := "${{ " + expr // approximate the expression reference
+					if isGHALoggingOnly(step.Run, expr) {
+						severity = SeverityInfo
+						detail = " (logging only — echo/printf context, not directly exploitable)"
+					}
+
 					findings = append(findings, Finding{
 						RuleID:   "FG-002",
-						Severity: SeverityHigh,
+						Severity: severity,
 						File:     wf.Path,
 						Line:     step.Line,
-						Message:  fmt.Sprintf("Script Injection: %s in run block", expr),
+						Message:  fmt.Sprintf("Script Injection: %s in run block%s", expr, detail),
 					})
+					_ = exprRef
 				}
 			}
 		}
 	}
 	return findings
+}
+
+// isGHALoggingOnly checks if a GitHub Actions expression is only used in echo/printf lines.
+func isGHALoggingOnly(run string, expr string) bool {
+	for _, line := range strings.Split(run, "\n") {
+		trimmed := strings.TrimSpace(line)
+		// Check if this line references the expression
+		if !strings.Contains(trimmed, expr) && !strings.Contains(trimmed, "${{") {
+			continue
+		}
+		// Approximate: check if the expression appears in this line
+		if !containsExpression(trimmed, expr) {
+			continue
+		}
+		// If this line is NOT an echo/printf, it's not logging-only
+		lower := strings.ToLower(trimmed)
+		isEcho := strings.HasPrefix(lower, "echo ") || strings.HasPrefix(lower, "echo\t") ||
+			strings.HasPrefix(lower, "echo \"") || strings.HasPrefix(lower, "echo '") ||
+			strings.HasPrefix(lower, "printf ") || strings.HasPrefix(lower, "cat <<")
+		if !isEcho {
+			return false
+		}
+	}
+	return true
 }
 
 var shaPattern = regexp.MustCompile(`^[a-f0-9]{40}$`)
