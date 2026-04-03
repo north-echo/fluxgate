@@ -879,8 +879,15 @@ func analyzeMitigations(wf *Workflow, job Job, checkoutIdx int, postCheckoutStep
 		}
 		isBot, isHuman := containsActorGuard(job.If)
 		if isBot {
-			m.ActorGuard = true
-			m.Details = append(m.Details, fmt.Sprintf("job if: restricts to bot actor (%s)", truncate(job.If, 80)))
+			// Compound guard: if the same if: expression has both an actor guard AND a fork guard,
+			// the fork guard is the real gate — the actor check is just an optimization.
+			// Classify as ForkGuard (suppresses to info) instead of ActorGuard (caps at high).
+			if m.ForkGuard {
+				m.Details = append(m.Details, fmt.Sprintf("compound guard: bot actor + fork origin check (%s)", truncate(job.If, 80)))
+			} else {
+				m.ActorGuard = true
+				m.Details = append(m.Details, fmt.Sprintf("job if: restricts to bot actor (%s)", truncate(job.If, 80)))
+			}
 		} else if isHuman {
 			m.ActorGuardHuman = true
 			m.Details = append(m.Details, fmt.Sprintf("job if: restricts to specific actor(s) (%s)", truncate(job.If, 80)))
@@ -1061,6 +1068,20 @@ func containsForkGuard(ifExpr string) bool {
 	for _, p := range forkGuardPatterns {
 		if strings.Contains(ifExpr, p) {
 			return true
+		}
+	}
+	// Also match head.repo.full_name compared to a literal string (e.g., 'kubernetes/minikube')
+	// This is equivalent to comparing against github.repository but with a hardcoded value.
+	// Must be == (same repo check), NOT != (fork-only check which is the opposite).
+	if strings.Contains(ifExpr, "head.repo.full_name") {
+		// Find the operator near head.repo.full_name
+		idx := strings.Index(ifExpr, "head.repo.full_name")
+		if idx >= 0 {
+			surrounding := ifExpr[idx:]
+			// Check for == but not != before it
+			if strings.Contains(surrounding, "==") && !strings.Contains(surrounding, "!=") {
+				return true
+			}
 		}
 	}
 	return false
