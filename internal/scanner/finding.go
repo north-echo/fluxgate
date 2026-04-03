@@ -1,53 +1,20 @@
 package scanner
 
-import "fmt"
+import pkgscanner "github.com/north-echo/fluxgate/pkg/scanner"
 
-// Severity levels for findings.
+type Finding = pkgscanner.Finding
+type ScanResult = pkgscanner.ScanResult
+type ScanOptions = pkgscanner.ScanOptions
+
 const (
-	SeverityCritical = "critical"
-	SeverityHigh     = "high"
-	SeverityMedium   = "medium"
-	SeverityLow      = "low"
-	SeverityInfo     = "info"
+	SeverityCritical  = pkgscanner.SeverityCritical
+	SeverityHigh      = pkgscanner.SeverityHigh
+	SeverityMedium    = pkgscanner.SeverityMedium
+	SeverityLow       = pkgscanner.SeverityLow
+	SeverityInfo      = pkgscanner.SeverityInfo
+	ConfidenceConfirmed   = pkgscanner.ConfidenceConfirmed
+	ConfidenceLikely      = pkgscanner.ConfidenceLikely
+	ConfidencePatternOnly = pkgscanner.ConfidencePatternOnly
 )
 
-// Confidence levels for findings.
-const (
-	ConfidenceConfirmed   = "confirmed"
-	ConfidenceLikely      = "likely"
-	ConfidencePatternOnly = "pattern-only"
-)
-
-// Finding represents a single security finding in a workflow file.
-type Finding struct {
-	RuleID      string   `json:"rule_id"`
-	Severity    string   `json:"severity"`
-	Confidence  string   `json:"confidence,omitempty"`
-	File        string   `json:"file"`
-	Line        int      `json:"line"`
-	Message     string   `json:"message"`
-	Details     string   `json:"details,omitempty"`
-	Mitigations []string `json:"mitigations,omitempty"`
-}
-
-func (f Finding) String() string {
-	return fmt.Sprintf("[%s] %s %s:%d — %s", f.Severity, f.RuleID, f.File, f.Line, f.Message)
-}
-
-// SeverityRank returns a numeric rank for sorting (lower = more severe).
-func SeverityRank(s string) int {
-	switch s {
-	case SeverityCritical:
-		return 0
-	case SeverityHigh:
-		return 1
-	case SeverityMedium:
-		return 2
-	case SeverityLow:
-		return 3
-	case SeverityInfo:
-		return 4
-	default:
-		return 5
-	}
-}
+var SeverityRank = pkgscanner.SeverityRank
