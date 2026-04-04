@@ -882,15 +882,20 @@ func newDisclosureListCmd() *cobra.Command {
 
 func newDisclosureUpdateCmd() *cobra.Command {
 	var id int64
-	var status, dbPath string
+	var status, disclosureID, notes, dbPath string
 
 	cmd := &cobra.Command{
 		Use:   "update",
-		Short: "Update disclosure status",
+		Short: "Update disclosure status, external ID, or notes",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			valid := map[string]bool{"filed": true, "acknowledged": true, "patched": true, "wontfix": true, "timeout": true}
-			if !valid[status] {
-				return fmt.Errorf("invalid status %q (must be filed/acknowledged/patched/wontfix/timeout)", status)
+			if status == "" && disclosureID == "" && notes == "" {
+				return fmt.Errorf("at least one of --status, --disclosure-id, or --notes must be provided")
+			}
+			if status != "" {
+				valid := map[string]bool{"filed": true, "acknowledged": true, "patched": true, "wontfix": true, "timeout": true}
+				if !valid[status] {
+					return fmt.Errorf("invalid status %q (must be filed/acknowledged/patched/wontfix/timeout)", status)
+				}
 			}
 			db, err := store.Open(dbPath)
 			if err != nil {
@@ -898,18 +903,35 @@ func newDisclosureUpdateCmd() *cobra.Command {
 			}
 			defer db.Close()
 
-			if err := db.UpdateDisclosureStatus(id, status); err != nil {
-				return err
+			updates := []string{}
+			if status != "" {
+				if err := db.UpdateDisclosureStatus(id, status); err != nil {
+					return err
+				}
+				updates = append(updates, "status="+status)
 			}
-			fmt.Printf("Disclosure #%d updated to status: %s\n", id, status)
+			if disclosureID != "" {
+				if err := db.UpdateDisclosureID(id, disclosureID); err != nil {
+					return err
+				}
+				updates = append(updates, "disclosure-id="+disclosureID)
+			}
+			if notes != "" {
+				if err := db.UpdateDisclosureNotes(id, notes); err != nil {
+					return err
+				}
+				updates = append(updates, "notes updated")
+			}
+			fmt.Printf("Disclosure #%d updated: %s\n", id, strings.Join(updates, ", "))
 			return nil
 		},
 	}
 	cmd.Flags().Int64Var(&id, "id", 0, "Disclosure ID")
-	cmd.Flags().StringVar(&status, "status", "", "New status")
+	cmd.Flags().StringVar(&status, "status", "", "New status (filed/acknowledged/patched/wontfix/timeout)")
+	cmd.Flags().StringVar(&disclosureID, "disclosure-id", "", "External disclosure ID")
+	cmd.Flags().StringVar(&notes, "notes", "", "Free-form notes")
 	cmd.Flags().StringVar(&dbPath, "db", "findings.db", "Database path")
 	cmd.MarkFlagRequired("id")
-	cmd.MarkFlagRequired("status")
 	return cmd
 }
 

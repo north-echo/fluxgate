@@ -310,6 +310,24 @@ func (d *DB) UpdateDisclosureStatus(id int64, status string) error {
 	return err
 }
 
+// UpdateDisclosureID sets the external disclosure ID from the reporting channel.
+func (d *DB) UpdateDisclosureID(id int64, disclosureID string) error {
+	_, err := d.db.Exec(
+		"UPDATE disclosures SET disclosure_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+		disclosureID, id,
+	)
+	return err
+}
+
+// UpdateDisclosureNotes sets free-form notes on a disclosure.
+func (d *DB) UpdateDisclosureNotes(id int64, notes string) error {
+	_, err := d.db.Exec(
+		"UPDATE disclosures SET notes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+		notes, id,
+	)
+	return err
+}
+
 // ListDisclosures returns disclosures with full context, optionally filtered.
 func (d *DB) ListDisclosures(status string, findingID int64) ([]DisclosureWithContext, error) {
 	query := `
