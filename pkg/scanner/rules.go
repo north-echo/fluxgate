@@ -27,6 +27,7 @@ type MitigationAnalysis struct {
 	PathIsolated       bool // Fork code checked out to subdirectory, no direct execution
 	TrustedRefIsolated bool // Fork checkout to subdir, all executed code from trusted ref
 	PermissionGateJob  bool // Upstream job verifies collaborator permissions via API
+	BuildBeforeCheckout bool // Binary compiled from base branch BEFORE PR code checkout
 	Details            []string
 }
 
@@ -167,6 +168,14 @@ func CheckPwnRequest(wf *Workflow) []Finding {
 
 		// Trusted-ref isolation: fork code in subdir, all execution from trusted ref — suppress
 		if mitigation.TrustedRefIsolated {
+			severity = SeverityInfo
+			confidence = ConfidencePatternOnly
+			mitigated = true
+		}
+
+		// Build-before-checkout: binary compiled from base branch before PR checkout — suppress
+		// The executed binary is from trusted code, PR content is only data input.
+		if mitigation.BuildBeforeCheckout {
 			severity = SeverityInfo
 			confidence = ConfidencePatternOnly
 			mitigated = true
@@ -997,7 +1006,50 @@ func analyzeMitigations(wf *Workflow, job Job, checkoutIdx int, postCheckoutStep
 		}
 	}
 
+	// 10. Check build-before-checkout pattern
+	// Pattern: binary compiled from base branch BEFORE PR code is checked out,
+	// then the pre-built binary runs against PR content as DATA (not code).
+	// Sequence: checkout(base) → build step (go build / cargo build / etc.) → checkout(PR head) → execute binary
+	if detectBuildBeforeCheckout(job.Steps, checkoutIdx) {
+		m.BuildBeforeCheckout = true
+		m.Details = append(m.Details, "build-before-checkout: binary compiled from base branch before PR checkout")
+	}
+
 	return m
+}
+
+// detectBuildBeforeCheckout detects the defense-in-depth pattern where a binary
+// is compiled from the trusted base branch before the PR's code is checked out.
+// The attacker cannot control the binary's code because it was built from base.
+func detectBuildBeforeCheckout(steps []Step, prCheckoutIdx int) bool {
+	if prCheckoutIdx <= 0 {
+		return false
+	}
+	// Must have a PRIOR checkout (base branch) before the PR checkout
+	hasBaseCheckout := false
+	hasBuildStep := false
+	for i := 0; i < prCheckoutIdx; i++ {
+		step := steps[i]
+		if isCheckoutAction(step.Uses) {
+			// A prior checkout with no ref (or with refs/heads/main/master) = base checkout
+			ref := step.With["ref"]
+			if ref == "" || ref == "main" || ref == "master" ||
+				strings.Contains(ref, "refs/heads/main") || strings.Contains(ref, "refs/heads/master") ||
+				strings.Contains(ref, "base_ref") {
+				hasBaseCheckout = true
+			}
+		}
+		// Check for build commands in run blocks BEFORE PR checkout
+		if step.Run != "" {
+			for _, cmd := range []string{"go build", "cargo build", "mvn package", "mvn compile", "gradle build", "gradle assemble", "dotnet build", "make build"} {
+				if strings.Contains(step.Run, cmd) {
+					hasBuildStep = true
+					break
+				}
+			}
+		}
+	}
+	return hasBaseCheckout && hasBuildStep
 }
 
 // downgradeBy reduces severity by N levels on the severity ladder.
