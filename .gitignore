@@ -33,5 +33,18 @@ SECURITY-BOUNDARIES.md
 test-report.md
 test-repos.txt
 
+# Specs, reports, and scan output docs
+*-spec.md
+*-spec-*.md
+*-report.md
+*-report-*.md
+compass_artifact_*.md
+fluxgate-blog-post-outline.md
+fluxgate-public-api-spec.md
+redhat-repos.txt
+validation-repos.txt
+minikube-poc/
+minikube-poc.zip
+
 # Research station (contains sensitive queries, prompts, configs)
 research-station/
