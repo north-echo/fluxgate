@@ -1,0 +1,33 @@
+name: Trusted Ref Data Argument
+on:
+  pull_request_target:
+
+jobs:
+  analyze:
+    name: Analyze PR
+    permissions:
+      contents: read
+      pull-requests: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code from PR branch
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: pr
+      - name: Checkout code from base
+        uses: actions/checkout@v4
+        with:
+          path: base
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+      - name: Count Line Diff
+        run: |
+          BASE="$GITHUB_WORKSPACE/base"
+          PR="$GITHUB_WORKSPACE/pr"
+          pip install tabulate $BASE
+          cp "$BASE/analyze.py" .
+          python analyze.py "$BASE" "$PR"

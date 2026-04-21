@@ -975,21 +975,28 @@ func analyzeMitigations(wf *Workflow, job Job, checkoutIdx int, postCheckoutStep
 	}
 
 	// 8. Check trusted-ref isolation
-	if checkoutPath != "" && m.PathIsolated {
-		hasTrustedRef := false
+	if checkoutPath != "" {
+		trustedRefPath := ""
 		for _, step := range job.Steps {
 			if isCheckoutAction(step.Uses) {
 				ref := step.With["ref"]
 				path := step.With["path"]
 				if isTrustedRef(ref) && path != checkoutPath {
-					hasTrustedRef = true
+					trustedRefPath = path
 					break
 				}
 			}
 		}
-		if hasTrustedRef {
-			m.TrustedRefIsolated = true
-			m.Details = append(m.Details, "trusted-ref isolation: fork code in subdirectory, executed scripts from trusted ref checkout")
+		if trustedRefPath != "" {
+			if m.PathIsolated {
+				// No fork path references in execution at all — straightforward isolation
+				m.TrustedRefIsolated = true
+				m.Details = append(m.Details, "trusted-ref isolation: fork code in subdirectory, executed scripts from trusted ref checkout")
+			} else if forkPathIsDataOnly(postCheckoutSteps, checkoutPath, trustedRefPath) {
+				// Fork path IS referenced, but only as data arguments to trusted-ref scripts
+				m.TrustedRefIsolated = true
+				m.Details = append(m.Details, "trusted-ref isolation: fork path passed as data argument to scripts sourced from trusted ref")
+			}
 		}
 	}
 
@@ -1259,6 +1266,274 @@ func referencesForkPath(run string, checkoutPath string) bool {
 	}
 
 	return false
+}
+
+// forkPathIsDataOnly checks whether fork path references in post-checkout steps
+// are only used as data arguments to scripts sourced from a trusted-ref checkout,
+// not as the executable itself. This detects patterns like:
+//
+//	cp "$BASE/sz.py" .
+//	python sz.py "$BASE" "$PR"   # $PR is data, sz.py is from trusted ref
+func forkPathIsDataOnly(postCheckoutSteps []Step, forkPath string, trustedRefPath string) bool {
+	for _, step := range postCheckoutSteps {
+		if step.Run == "" || !referencesForkPath(step.Run, forkPath) {
+			continue
+		}
+		// This step references the fork path — check if it's safe
+		if !runBlockUsesForPathAsDataOnly(step.Run, forkPath, trustedRefPath) {
+			return false
+		}
+	}
+	return true
+}
+
+// runBlockUsesForPathAsDataOnly analyzes a run block to determine if all references
+// to the fork path are as data arguments (not executables). It tracks variable aliases
+// for both fork and trusted-ref paths, detects scripts copied from the trusted ref,
+// and verifies that fork path references appear only in argument position.
+func runBlockUsesForPathAsDataOnly(run string, forkPath string, trustedRefPath string) bool {
+	lines := strings.Split(run, "\n")
+
+	// Build alias patterns for both paths
+	forkAliases := pathAliasPatterns(forkPath)
+	trustedAliases := pathAliasPatterns(trustedRefPath)
+
+	// Resolve shell variable assignments for both paths
+	forkVars := resolvePathVars(lines, forkAliases)
+	trustedVars := resolvePathVars(lines, trustedAliases)
+
+	// Track scripts copied from the trusted ref
+	trustedScripts := trackCopiedScripts(lines, trustedAliases, trustedVars)
+
+	// Track pip/npm installs from the trusted ref (makes imports safe)
+	hasTrustedInstall := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		for _, tv := range append(trustedVars, trustedAliases...) {
+			if strings.Contains(trimmed, "pip install") && strings.Contains(trimmed, tv) {
+				hasTrustedInstall = true
+			}
+			if strings.Contains(trimmed, "npm install") && strings.Contains(trimmed, tv) {
+				hasTrustedInstall = true
+			}
+		}
+	}
+
+	// All fork-path + fork-var aliases to check
+	allForkRefs := append(forkAliases, forkVars...)
+
+	// Check each line that references the fork path
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+
+		hasForkRef := false
+		for _, fr := range allForkRefs {
+			if strings.Contains(trimmed, fr) {
+				hasForkRef = true
+				break
+			}
+		}
+		if !hasForkRef {
+			continue
+		}
+
+		// Variable assignment — safe
+		if isVariableAssignment(trimmed) {
+			continue
+		}
+
+		// Data-only commands — safe
+		if isDataOnlyCommand(trimmed) {
+			continue
+		}
+
+		// Check if this is an interpreter command where the script is from trusted ref
+		if isInterpreterWithTrustedScript(trimmed, trustedScripts, trustedAliases, trustedVars, allForkRefs, hasTrustedInstall) {
+			continue
+		}
+
+		// Fork path in executable position — not safe
+		return false
+	}
+	return true
+}
+
+// pathAliasPatterns returns patterns that reference a checkout path.
+func pathAliasPatterns(path string) []string {
+	if path == "" {
+		return nil
+	}
+	return []string{
+		"$GITHUB_WORKSPACE/" + path,
+		"${GITHUB_WORKSPACE}/" + path,
+		"./" + path,
+		"\"" + path + "\"",
+		"'" + path + "'",
+	}
+}
+
+// resolvePathVars finds shell variable assignments that reference the given path aliases
+// and returns the variable reference forms ($VAR, ${VAR}).
+func resolvePathVars(lines []string, aliases []string) []string {
+	var vars []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		eqIdx := strings.Index(line, "=")
+		if eqIdx <= 0 {
+			continue
+		}
+		varName := strings.TrimSpace(line[:eqIdx])
+		if len(varName) == 0 || strings.ContainsAny(varName, " \t$()") {
+			continue
+		}
+		for _, ap := range aliases {
+			if strings.Contains(line, ap) {
+				vars = append(vars, "$"+varName, "${"+varName+"}")
+				break
+			}
+		}
+	}
+	return vars
+}
+
+// trackCopiedScripts finds scripts copied from the trusted ref (e.g., cp "$BASE/sz.py" .)
+// and returns their local filenames.
+func trackCopiedScripts(lines []string, trustedAliases []string, trustedVars []string) map[string]bool {
+	scripts := map[string]bool{}
+	allTrusted := append(trustedAliases, trustedVars...)
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "cp ") {
+			continue
+		}
+		hasTrustedSrc := false
+		for _, t := range allTrusted {
+			if strings.Contains(trimmed, t) {
+				hasTrustedSrc = true
+				break
+			}
+		}
+		if !hasTrustedSrc {
+			continue
+		}
+		// Extract the filename from the source path: cp "$BASE/sz.py" . → sz.py
+		parts := splitShellArgs(trimmed)
+		if len(parts) >= 3 {
+			src := parts[1]
+			src = strings.Trim(src, "\"'")
+			if idx := strings.LastIndex(src, "/"); idx >= 0 {
+				scripts[src[idx+1:]] = true
+			}
+		}
+	}
+	return scripts
+}
+
+// isVariableAssignment checks if a line is a shell variable assignment.
+func isVariableAssignment(line string) bool {
+	eqIdx := strings.Index(line, "=")
+	if eqIdx <= 0 {
+		return false
+	}
+	varName := line[:eqIdx]
+	return !strings.ContainsAny(varName, " \t$()") && len(varName) > 0
+}
+
+// isInterpreterWithTrustedScript checks if a command line runs an interpreter
+// (python, node, bash, etc.) where the script comes from the trusted ref
+// and the fork path is only in argument position.
+func isInterpreterWithTrustedScript(line string, trustedScripts map[string]bool, trustedAliases []string, trustedVars []string, forkRefs []string, hasTrustedInstall bool) bool {
+	interpreters := []string{"python", "python3", "node", "ruby", "bash", "sh", "perl"}
+	parts := splitShellArgs(line)
+	if len(parts) < 2 {
+		return false
+	}
+
+	cmd := parts[0]
+	isInterpreter := false
+	for _, interp := range interpreters {
+		if cmd == interp {
+			isInterpreter = true
+			break
+		}
+	}
+	if !isInterpreter {
+		return false
+	}
+
+	// Find the script argument (first arg that's not a flag)
+	scriptIdx := -1
+	for i := 1; i < len(parts); i++ {
+		if !strings.HasPrefix(parts[i], "-") {
+			scriptIdx = i
+			break
+		}
+	}
+	if scriptIdx < 0 {
+		return false
+	}
+
+	script := strings.Trim(parts[scriptIdx], "\"'")
+
+	// Check if the script itself references the fork path — that's code execution
+	for _, fr := range forkRefs {
+		if strings.Contains(script, strings.Trim(fr, "\"'")) {
+			return false
+		}
+	}
+
+	// Check if the script is from the trusted ref (copied or direct path)
+	allTrusted := append(trustedAliases, trustedVars...)
+	if trustedScripts[script] {
+		return true
+	}
+	for _, t := range allTrusted {
+		if strings.Contains(script, strings.Trim(t, "\"'")) {
+			return true
+		}
+	}
+
+	// If there's a pip/npm install from trusted ref, interpreter scripts that
+	// don't reference the fork path as executable are likely using trusted imports
+	if hasTrustedInstall {
+		return true
+	}
+
+	return false
+}
+
+// splitShellArgs does a basic split of a shell command line, respecting quoted strings.
+func splitShellArgs(line string) []string {
+	var args []string
+	var current strings.Builder
+	inSingle := false
+	inDouble := false
+
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		switch {
+		case c == '\'' && !inDouble:
+			inSingle = !inSingle
+			current.WriteByte(c)
+		case c == '"' && !inSingle:
+			inDouble = !inDouble
+			current.WriteByte(c)
+		case c == ' ' && !inSingle && !inDouble:
+			if current.Len() > 0 {
+				args = append(args, current.String())
+				current.Reset()
+			}
+		default:
+			current.WriteByte(c)
+		}
+	}
+	if current.Len() > 0 {
+		args = append(args, current.String())
+	}
+	return args
 }
 
 // isDataOnlyCommand checks if a shell line is a data-copy operation (not execution).

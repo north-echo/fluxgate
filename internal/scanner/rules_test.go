@@ -492,6 +492,36 @@ func TestCheckPwnRequest_PathExec(t *testing.T) {
 	}
 }
 
+func TestCheckPwnRequest_TrustedRefDataArg(t *testing.T) {
+	wf := loadFixture(t, "trusted-ref-data-arg.yaml")
+	findings := CheckPwnRequest(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(findings))
+	}
+	f := findings[0]
+	// Fork path is only passed as data argument to trusted-ref script — should be info
+	if f.Severity != SeverityInfo {
+		t.Errorf("expected info severity for trusted-ref data arg pattern, got %s", f.Severity)
+	}
+	if f.Confidence != ConfidencePatternOnly {
+		t.Errorf("expected pattern-only confidence, got %s", f.Confidence)
+	}
+	if len(f.Mitigations) == 0 {
+		t.Error("expected mitigations to mention trusted-ref isolation")
+	}
+	found := false
+	for _, m := range f.Mitigations {
+		if strings.Contains(m, "trusted-ref isolation") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected mitigations to contain 'trusted-ref isolation', got %v", f.Mitigations)
+	}
+}
+
 // --- FG-008 OIDC tests ---
 
 func TestCheckOIDC_PRTWithForkCheckout(t *testing.T) {
