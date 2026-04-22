@@ -42,6 +42,7 @@ A pre-push hook blocks commits containing disclosure ID patterns. Use `--no-veri
 - `internal/dashboard/` — Go/HTMX web UI (multi-DB switcher, CSV export)
 - `internal/diff/`, `internal/merge/`, `internal/export/` — Longitudinal analysis
 - `test/fixtures/` — Synthetic YAML fixtures for rule tests
+- `internal/git/` — Sparse clone package for `--clone` batch scanning mode
 - `research-station/` — Gitignored. Persistent scanning infrastructure on Dell OptiPlex.
 
 ## Available CLI Commands
@@ -62,12 +63,16 @@ sarif-push    — Upload findings to GitHub Code Scanning API
 cache         — Manage no-workflow cache (stats/clear)
 ```
 
-## Testing
+## Build & Testing
 
 ```bash
-go test ./...      # All tests (scanner, cicd, github, gitlab, diff, merge, export, pkg/scanner)
-go build ./...     # Must compile cleanly
+CGO_ENABLED=0 go build ./...   # Must compile cleanly — pure Go, no CGO needed (modernc.org/sqlite)
+go test ./...                  # All tests (scanner, cicd, github, gitlab, diff, merge, export, pkg/scanner)
 ```
+
+The CI workflow (`.github/workflows/ci.yaml`) runs a self-scan step (`fluxgate scan . --severity critical,high`) after build — Fluxgate eats its own dogfood.
+
+YAML input is size-limited to 10MB (`MaxYAMLSize` in `pkg/scanner/scan.go`) to prevent YAML bomb DoS.
 
 All rules must have corresponding test fixtures and test functions in `*_test.go`. Rules in `pkg/scanner/rules.go` have tests in `pkg/scanner/rules_test.go`. Platform rules in `internal/cicd/` have tests in the same package.
 
@@ -84,7 +89,7 @@ All rules must have corresponding test fixtures and test functions in `*_test.go
 ## Severity Tuning Lessons Learned
 
 - **Compound guards**: actor guard + fork-origin check in the same `if:` = ForkGuard (suppress to info), not just ActorGuard (cap at high)
-- **Trusted-ref isolation**: fork checkout to subdir + executed scripts from trusted ref checkout = info
+- **Trusted-ref isolation**: fork checkout to subdir + executed scripts from trusted ref checkout = info. Also applies when fork path is passed as a **data argument** to trusted-ref scripts (e.g., `cp "$BASE/sz.py" . && python sz.py "$PR"`) — see `forkPathIsDataOnly()` in `pkg/scanner/rules.go`
 - **Permission-gate jobs**: upstream job verifying `getCollaboratorPermissionLevel` = internal threat only, downgrade by 2
 - **Ref-scoped cache keys**: `CI_COMMIT_REF_SLUG` is ref-scoped by default since GitLab 13.x — info, not medium
 - **Rules vs scripts**: CI variables in GitLab `rules:` blocks are NOT shell injection, only in `script:` blocks
