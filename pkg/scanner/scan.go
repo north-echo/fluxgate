@@ -10,6 +10,14 @@ import (
 	"github.com/north-echo/fluxgate/internal/cicd"
 )
 
+// MaxYAMLSize is the maximum allowed size (in bytes) for a workflow YAML file.
+// Files larger than this are rejected before parsing to prevent YAML bomb DoS.
+// 10 MB is generous — real workflow files rarely exceed 100 KB.
+const MaxYAMLSize = 10 * 1024 * 1024
+
+// ErrFileTooLarge is returned when a workflow file exceeds MaxYAMLSize.
+var ErrFileTooLarge = fmt.Errorf("workflow file exceeds maximum size (%d bytes)", MaxYAMLSize)
+
 // ScanOptions configures a scan run.
 type ScanOptions struct {
 	Severities []string // filter by severity (empty = all)
@@ -181,6 +189,9 @@ func ScanWorkflowBytes(data []byte, path string, opts ScanOptions) ([]Finding, e
 // ScanGitLabCI parses and scans a .gitlab-ci.yml file, returning findings
 // in the common Finding format.
 func ScanGitLabCI(data []byte, path string, opts ScanOptions) []Finding {
+	if len(data) > MaxYAMLSize {
+		return nil
+	}
 	pipeline, err := cicd.ParseGitLabCI(data, path)
 	if err != nil {
 		return nil
@@ -238,6 +249,9 @@ func ScanGitLabCI(data []byte, path string, opts ScanOptions) []Finding {
 // ScanAzurePipelines parses and scans an azure-pipelines.yml file, returning
 // findings in the common Finding format.
 func ScanAzurePipelines(data []byte, path string, opts ScanOptions) []Finding {
+	if len(data) > MaxYAMLSize {
+		return nil
+	}
 	pipeline, err := cicd.ParseAzurePipeline(data, path)
 	if err != nil {
 		return nil
@@ -293,6 +307,9 @@ func ScanAzurePipelines(data []byte, path string, opts ScanOptions) []Finding {
 
 // ScanJenkinsfile parses and scans a Jenkinsfile.
 func ScanJenkinsfile(data []byte, path string, opts ScanOptions) []Finding {
+	if len(data) > MaxYAMLSize {
+		return nil
+	}
 	pipeline, err := cicd.ParseJenkinsfile(data, path)
 	if err != nil {
 		return nil
@@ -310,6 +327,9 @@ func ScanJenkinsfile(data []byte, path string, opts ScanOptions) []Finding {
 
 // ScanTektonPipeline parses and scans a Tekton Pipeline/Task YAML.
 func ScanTektonPipeline(data []byte, path string, opts ScanOptions) []Finding {
+	if len(data) > MaxYAMLSize {
+		return nil
+	}
 	pipeline, err := cicd.ParseTektonPipeline(data, path)
 	if err != nil {
 		return nil
@@ -327,6 +347,9 @@ func ScanTektonPipeline(data []byte, path string, opts ScanOptions) []Finding {
 
 // ScanCircleCI parses and scans a .circleci/config.yml.
 func ScanCircleCI(data []byte, path string, opts ScanOptions) []Finding {
+	if len(data) > MaxYAMLSize {
+		return nil
+	}
 	pipeline, err := cicd.ParseCircleCI(data, path)
 	if err != nil {
 		return nil

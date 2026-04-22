@@ -110,6 +110,9 @@ func ParseWorkflowFile(path string) (*Workflow, error) {
 
 // ParseWorkflow parses workflow YAML content.
 func ParseWorkflow(data []byte, path string) (*Workflow, error) {
+	if len(data) > MaxYAMLSize {
+		return nil, fmt.Errorf("parsing %s: %w", path, ErrFileTooLarge)
+	}
 	var doc yaml.Node
 	if err := yaml.Unmarshal(data, &doc); err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", path, err)

@@ -30,3 +30,6 @@ jobs:
 
       - name: Build
         run: go build ./cmd/fluxgate
+
+      - name: Self-scan
+        run: ./fluxgate scan . --severity critical,high
