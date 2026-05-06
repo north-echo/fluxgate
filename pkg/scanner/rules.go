@@ -2988,3 +2988,138 @@ func CheckArtifactCredentialLeak(wf *Workflow) []Finding {
 	}
 	return findings
 }
+
+// envFileWritePattern matches redirections to $GITHUB_ENV or $GITHUB_PATH.
+// Covers > and >>, optional double-quotes, and ${} brace form.
+var envFileWritePattern = regexp.MustCompile(`>>?\s*"?\$\{?GITHUB_(ENV|PATH)\}?"?`)
+
+// CheckGitHubEnvInjection detects tainted writes to $GITHUB_ENV or $GITHUB_PATH
+// that smuggle attacker-controlled content into env vars or PATH for later steps
+// in the same job (FG-024). Per-step bash quoting protects the immediate write
+// but the persisted value is unquoted at the consumption site, defeating the
+// quoted-arg downgrade applied by FG-002.
+func CheckGitHubEnvInjection(wf *Workflow) []Finding {
+	// Scope to fork-eligible / external-content triggers. push/schedule/
+	// workflow_dispatch are authenticated-actor contexts (different threat model).
+	if !wf.On.PullRequest && !wf.On.PullRequestTarget &&
+		!wf.On.IssueComment && !wf.On.WorkflowRun {
+		return nil
+	}
+
+	highTaint := []string{
+		"github.event.issue.title",
+		"github.event.issue.body",
+		"github.event.pull_request.title",
+		"github.event.pull_request.body",
+		"github.event.comment.body",
+		"github.event.review.body",
+		"github.event.pages.*.page_name",
+		"github.event.commits.*.message",
+		"github.event.head_commit.message",
+	}
+	medTaint := []string{
+		"github.head_ref",
+		"github.event.workflow_run.head_branch",
+		"github.event.inputs.",
+		"inputs.",
+	}
+
+	var findings []Finding
+	for _, job := range wf.Jobs {
+		checkoutIdx := -1
+		for i, s := range job.Steps {
+			if isCheckoutAction(s.Uses) {
+				checkoutIdx = i
+				break
+			}
+		}
+		var postCheckout []Step
+		if checkoutIdx >= 0 && checkoutIdx+1 < len(job.Steps) {
+			postCheckout = job.Steps[checkoutIdx+1:]
+		}
+		mit := analyzeMitigations(wf, job, checkoutIdx, postCheckout, "")
+
+		for _, step := range job.Steps {
+			if step.Run == "" {
+				continue
+			}
+			if !envFileWritePattern.MatchString(step.Run) {
+				continue
+			}
+
+			target := "GITHUB_ENV"
+			if strings.Contains(step.Run, "GITHUB_PATH") {
+				target = "GITHUB_PATH"
+			}
+
+			matchedExpr := ""
+			taintTier := ""
+			for _, expr := range highTaint {
+				if containsExpression(step.Run, expr) {
+					matchedExpr = expr
+					taintTier = "high"
+					break
+				}
+			}
+			if taintTier == "" {
+				for _, expr := range medTaint {
+					if containsExpression(step.Run, expr) {
+						matchedExpr = expr
+						taintTier = "med"
+						break
+					}
+				}
+			}
+			if taintTier == "" {
+				continue
+			}
+
+			// Base severity by trigger + taint tier.
+			//   pull_request_target / issue_comment / workflow_run + high → critical
+			//   same triggers + med → high
+			//   pull_request → cap at high (no secrets, but injection is real)
+			severity := SeverityHigh
+			if wf.On.PullRequestTarget || wf.On.IssueComment || wf.On.WorkflowRun {
+				if taintTier == "high" {
+					severity = SeverityCritical
+				} else {
+					severity = SeverityHigh
+				}
+			} else if wf.On.PullRequest {
+				severity = SeverityHigh
+			}
+
+			// Mitigation downgrades — fork/label/env gates protect the workflow
+			// run as a whole, so they apply to env-file injection too. Fork guard
+			// reduces this to internal-collaborator threat (matches FG-001 pattern).
+			mitNote := ""
+			switch {
+			case mit.ForkGuard:
+				severity = SeverityInfo
+				mitNote = " (fork guard — internal-collaborator threat only)"
+			case mit.LabelGated, mit.EnvironmentGated, mit.MaintainerCheck:
+				severity = downgradeBy(severity, 1)
+				mitNote = " (gate detected — downgraded)"
+			}
+
+			findings = append(findings, Finding{
+				RuleID:   "FG-024",
+				Severity: severity,
+				File:     wf.Path,
+				Line:     step.Line,
+				Message: fmt.Sprintf(
+					"GitHub Env Injection: %s written to $%s — persists as env var/PATH for later steps%s",
+					matchedExpr, target, mitNote),
+				Details: "Bash quoting protects the immediate write, but the persisted value is " +
+					"interpolated unquoted by later steps. The injection is laundered through " +
+					"the env file and bypasses per-step quoted-arg analysis (FG-002).",
+				Mitigations: []string{
+					"Sanitize attacker-controlled values before writing to $GITHUB_ENV / $GITHUB_PATH",
+					"Use the action's `env:` block with the expression as the value, not shell redirection",
+					"For pull_request_target: gate the job with a maintainer label or environment approval",
+				},
+			})
+		}
+	}
+	return findings
+}

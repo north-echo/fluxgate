@@ -1,0 +1,7 @@
+name: GitHub Env Injection — pull_request scope
+on: pull_request
+jobs:
+  pr-high-taint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "PR_TITLE=${{ github.event.pull_request.title }}" >> $GITHUB_ENV

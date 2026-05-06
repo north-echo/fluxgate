@@ -1,0 +1,41 @@
+name: GitHub Env Injection Test
+on:
+  pull_request_target:
+    types: [opened, synchronize]
+jobs:
+  prt-high-taint-env:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "PR_TITLE=${{ github.event.pull_request.title }}" >> $GITHUB_ENV
+
+  prt-high-taint-path:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "${{ github.event.issue.body }}" >> "$GITHUB_PATH"
+
+  prt-med-taint-env:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "BRANCH=${{ github.head_ref }}" >> ${GITHUB_ENV}
+
+  prt-static-write:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "VERSION=1.0.0" >> $GITHUB_ENV
+
+  prt-unrelated-redirect:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "${{ github.event.pull_request.title }}" >> /tmp/notes.log
+
+  prt-label-gated:
+    if: contains(github.event.pull_request.labels.*.name, 'safe-to-test')
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "PR_BODY=${{ github.event.pull_request.body }}" >> $GITHUB_ENV
+
+  prt-fork-guarded:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "PR_BODY=${{ github.event.pull_request.body }}" >> $GITHUB_ENV

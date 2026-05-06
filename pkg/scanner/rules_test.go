@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -257,11 +258,96 @@ func TestCheckArtifactCredentialLeak(t *testing.T) {
 	}
 }
 
+func TestCheckGitHubEnvInjection(t *testing.T) {
+	wf, err := ParseWorkflowFile("../../test/fixtures/github-env-injection.yaml")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	findings := CheckGitHubEnvInjection(wf)
+
+	jobsFlagged := map[string]string{}
+	for _, f := range findings {
+		if f.RuleID != "FG-024" {
+			t.Errorf("expected FG-024, got %s", f.RuleID)
+		}
+		// Use the matched line as a rough proxy for which job flagged.
+		jobsFlagged[f.Message] = f.Severity
+	}
+
+	// Expected: 5 findings —
+	//   2 critical (high-taint to ENV, high-taint to PATH),
+	//   2 high (med-taint head_ref + label-gated critical→high one-step downgrade),
+	//   1 info (fork-guarded — internal-collaborator only).
+	// Static write and unrelated redirect produce nothing.
+	if len(findings) != 5 {
+		t.Fatalf("expected 5 findings, got %d: %v", len(findings), findings)
+	}
+
+	criticalCount, highCount, infoCount := 0, 0, 0
+	for _, f := range findings {
+		switch f.Severity {
+		case SeverityCritical:
+			criticalCount++
+		case SeverityHigh:
+			highCount++
+		case SeverityInfo:
+			infoCount++
+		}
+	}
+	if criticalCount != 2 {
+		t.Errorf("expected 2 critical findings (high-taint ENV + PATH), got %d", criticalCount)
+	}
+	if highCount != 2 {
+		t.Errorf("expected 2 high findings (med-taint head_ref + label-gated critical→high), got %d", highCount)
+	}
+	if infoCount != 1 {
+		t.Errorf("expected 1 info finding (fork-guarded — internal threat only), got %d", infoCount)
+	}
+
+	// Verify GITHUB_PATH is named in at least one finding's message.
+	pathMentioned := false
+	for _, f := range findings {
+		if strings.Contains(f.Message, "GITHUB_PATH") {
+			pathMentioned = true
+			break
+		}
+	}
+	if !pathMentioned {
+		t.Error("expected at least one finding to reference GITHUB_PATH")
+	}
+}
+
+func TestCheckGitHubEnvInjection_PullRequestNoSecrets(t *testing.T) {
+	wf, err := ParseWorkflowFile("../../test/fixtures/github-env-injection-pr.yaml")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	findings := CheckGitHubEnvInjection(wf)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding on pull_request, got %d", len(findings))
+	}
+	// On pull_request the threat model lacks secrets — cap at high even with high-taint source.
+	if findings[0].Severity != SeverityHigh {
+		t.Errorf("expected high severity on pull_request (no secrets from forks), got %s", findings[0].Severity)
+	}
+}
+
+func TestCheckGitHubEnvInjection_PushOutOfScope(t *testing.T) {
+	wf, err := ParseWorkflowFile("../../test/fixtures/github-env-injection-push.yaml")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	findings := CheckGitHubEnvInjection(wf)
+	if len(findings) != 0 {
+		t.Errorf("expected 0 findings on push (authenticated-actor context), got %d: %v", len(findings), findings)
+	}
+}
+
 // --- AllRules completeness ---
 
 func TestAllRules_IncludesNewRules(t *testing.T) {
 	rules := AllRules()
-	expectedIDs := []string{"FG-018", "FG-019", "FG-020", "FG-021", "FG-022", "FG-023"}
+	expectedIDs := []string{"FG-018", "FG-019", "FG-020", "FG-021", "FG-022", "FG-023", "FG-024"}
 	for _, id := range expectedIDs {
 		if _, ok := rules[id]; !ok {
 			t.Errorf("AllRules() missing %s", id)

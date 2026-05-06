@@ -1,0 +1,7 @@
+name: GitHub Env Injection — push scope (out of scope)
+on: push
+jobs:
+  push-tainted-write:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "MSG=${{ github.event.head_commit.message }}" >> $GITHUB_ENV
