@@ -2772,10 +2772,12 @@ func CheckCrossStepOutputTaint(wf *Workflow) []Finding {
 
 // advisoryEntry describes a known security advisory for an action version.
 type advisoryEntry struct {
-	FixedVersion string
-	Advisory     string
-	Description  string
-	HighSeverity bool // true for supply chain compromises
+	FixedVersion     string
+	Advisory         string
+	Description      string
+	HighSeverity     bool // true for supply chain compromises
+	AllVersions      bool // true when every tag/SHA is compromised (no fixed version exists)
+	CriticalSeverity bool // true for credential-stealing supply chain takeovers
 }
 
 // knownVulnerableActions maps action names to their known advisories.
@@ -2791,6 +2793,14 @@ var knownVulnerableActions = map[string][]advisoryEntry{
 	},
 	"docker/build-push-action": {
 		{FixedVersion: "4.2.0", Advisory: "credential leak", Description: "credential leak", HighSeverity: false},
+	},
+	"actions-cool/issues-helper": {
+		{AllVersions: true, CriticalSeverity: true, Advisory: "actions-cool-impostor-commit-2026",
+			Description: "all tags retargeted to impostor commits stealing runner credentials (exfil: t.m-kosche[.]com); repo disabled by GitHub"},
+	},
+	"actions-cool/maintain-one-comment": {
+		{AllVersions: true, CriticalSeverity: true, Advisory: "actions-cool-impostor-commit-2026",
+			Description: "15 tags retargeted to impostor commits stealing runner credentials (exfil: t.m-kosche[.]com); repo disabled by GitHub"},
 	},
 }
 
@@ -2855,23 +2865,51 @@ func CheckKnownVulnerableActions(wf *Workflow) []Finding {
 				continue
 			}
 
-			// Skip SHA-pinned (can't determine version from SHA alone)
-			if shaPattern.MatchString(ref) {
-				continue
-			}
+			isSHA := shaPattern.MatchString(ref)
 
 			for _, adv := range advisories {
+				severity := SeverityMedium
+				switch {
+				case adv.CriticalSeverity:
+					severity = SeverityCritical
+				case adv.HighSeverity:
+					severity = SeverityHigh
+				}
+
+				desc := adv.Description
+				if desc == "" {
+					desc = "known vulnerability"
+				}
+
+				if adv.AllVersions {
+					findings = append(findings, Finding{
+						RuleID:   "FG-022",
+						Severity: severity,
+						File:     wf.Path,
+						Line:     step.Line,
+						Message: fmt.Sprintf(
+							"Compromised Action: %s@%s — %s (%s); remove this action",
+							action, ref, desc, adv.Advisory),
+						Details: fmt.Sprintf(
+							"Action %s is fully compromised — every tag and the underlying commits "+
+								"are attacker-controlled (%s). No fixed version exists. "+
+								"Remove all references to this action and rotate any secrets that "+
+								"may have been exposed to its runs.",
+							action, adv.Advisory),
+						Mitigations: []string{
+							fmt.Sprintf("Remove all uses of %s", action),
+							"Rotate any secrets exposed to workflows that ran this action",
+							"Audit runner credentials and OIDC token usage during the compromise window",
+						},
+					})
+					continue
+				}
+
+				// Version-bounded advisory: SHA pins can't be version-compared.
+				if isSHA {
+					continue
+				}
 				if versionLessThan(ref, adv.FixedVersion) {
-					severity := SeverityMedium
-					if adv.HighSeverity {
-						severity = SeverityHigh
-					}
-
-					desc := adv.Description
-					if desc == "" {
-						desc = "known vulnerability"
-					}
-
 					findings = append(findings, Finding{
 						RuleID:   "FG-022",
 						Severity: severity,

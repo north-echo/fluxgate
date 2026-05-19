@@ -16,3 +16,7 @@ jobs:
       - uses: tj-actions/changed-files@a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2
       # Vulnerable docker/build-push-action
       - uses: docker/build-push-action@v4.1.0
+      # Fully compromised: actions-cool/* (all tags retargeted to impostor commits)
+      - uses: actions-cool/issues-helper@v3
+      # Same campaign — SHA-pinned, but the SHA itself belongs to attacker fork
+      - uses: actions-cool/maintain-one-comment@a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2

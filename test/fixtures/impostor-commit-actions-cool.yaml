@@ -1,0 +1,20 @@
+name: Impostor Commit — actions-cool campaign (May 2026)
+# Regression fixture modeled on the actions-cool/issues-helper +
+# actions-cool/maintain-one-comment compromise: attacker pushed commits to a
+# fork, then retargeted upstream tags to those commits so any version reference
+# (tag or SHA) resolves to attacker code. Exfil domain was t.m-kosche[.]com.
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      # Tag pin to compromised action — FG-003 catches the tag pin, FG-022
+      # catches the known-compromised action.
+      - uses: actions-cool/issues-helper@v3
+      # SHA pin to compromised action — looks "safe" but the SHA itself is the
+      # impostor commit. FG-018 must flag this (unknown org, SHA-pinned).
+      - uses: actions-cool/maintain-one-comment@deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+      # Control: safe-org SHA pin — should NOT flag under FG-018.
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11

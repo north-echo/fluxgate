@@ -27,6 +27,29 @@ func TestCheckImpostorCommit(t *testing.T) {
 	}
 }
 
+// Regression: actions-cool/issues-helper + actions-cool/maintain-one-comment
+// supply chain attack (May 2026). All tags were retargeted to impostor commits;
+// only a full-SHA from the original repo was safe. We expect FG-018 to flag the
+// SHA-pinned use of actions-cool/* (unknown org, SHA-pinned) and ignore the
+// tag-pinned form (FG-003 handles that) and the safe-org control.
+func TestCheckImpostorCommit_ActionsCoolCampaign(t *testing.T) {
+	wf, err := ParseWorkflowFile("../../test/fixtures/impostor-commit-actions-cool.yaml")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	findings := CheckImpostorCommit(wf)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d: %v", len(findings), findings)
+	}
+	f := findings[0]
+	if f.RuleID != "FG-018" {
+		t.Errorf("expected FG-018, got %s", f.RuleID)
+	}
+	if !strings.Contains(f.Message, "actions-cool/maintain-one-comment") {
+		t.Errorf("expected message to name actions-cool/maintain-one-comment, got: %s", f.Message)
+	}
+}
+
 func TestCheckImpostorCommit_SafeOrgs(t *testing.T) {
 	wf := &Workflow{
 		Path: "test.yaml",
@@ -173,22 +196,34 @@ func TestCheckKnownVulnerableActions(t *testing.T) {
 	}
 	findings := CheckKnownVulnerableActions(wf)
 
-	// Should flag: tj-actions@v44, actions/checkout@v4.1.0, docker/build-push-action@v4.1.0
-	// Should NOT flag: actions/checkout@v4.2.0, tj-actions@v45.0.1, SHA-pinned
-	if len(findings) != 3 {
-		t.Fatalf("expected 3 findings, got %d: %v", len(findings), findings)
+	// Should flag:
+	//   tj-actions@v44, actions/checkout@v4.1.0, docker/build-push-action@v4.1.0,
+	//   actions-cool/issues-helper@v3, actions-cool/maintain-one-comment@<sha>
+	// Should NOT flag: actions/checkout@v4.2.0, tj-actions@v45.0.1, tj-actions SHA-pinned
+	if len(findings) != 5 {
+		t.Fatalf("expected 5 findings, got %d: %v", len(findings), findings)
 	}
 
 	hasHigh := false
 	hasMedium := false
+	hasCritical := false
+	criticalActions := map[string]bool{}
 	for _, f := range findings {
 		if f.RuleID != "FG-022" {
 			t.Errorf("expected FG-022, got %s", f.RuleID)
 		}
-		if f.Severity == SeverityHigh {
+		switch f.Severity {
+		case SeverityCritical:
+			hasCritical = true
+			if strings.Contains(f.Message, "actions-cool/issues-helper") {
+				criticalActions["issues-helper"] = true
+			}
+			if strings.Contains(f.Message, "actions-cool/maintain-one-comment") {
+				criticalActions["maintain-one-comment"] = true
+			}
+		case SeverityHigh:
 			hasHigh = true
-		}
-		if f.Severity == SeverityMedium {
+		case SeverityMedium:
 			hasMedium = true
 		}
 	}
@@ -197,6 +232,12 @@ func TestCheckKnownVulnerableActions(t *testing.T) {
 	}
 	if !hasMedium {
 		t.Error("expected at least one medium severity finding")
+	}
+	if !hasCritical {
+		t.Error("expected at least one critical severity finding (actions-cool)")
+	}
+	if !criticalActions["issues-helper"] || !criticalActions["maintain-one-comment"] {
+		t.Errorf("expected both actions-cool entries flagged as critical, got: %v", criticalActions)
 	}
 }
 
