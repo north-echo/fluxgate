@@ -27,14 +27,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var version = "0.7.0"
-
 func main() {
 	rootCmd := &cobra.Command{
 		Use:     "fluxgate",
 		Short:   "CI/CD Pipeline Security Gate",
 		Long:    "Fluxgate scans GitHub Actions workflow files for dangerous security patterns.",
-		Version: version,
+		Version: scanner.Version,
 	}
 
 	rootCmd.AddCommand(newScanCmd())

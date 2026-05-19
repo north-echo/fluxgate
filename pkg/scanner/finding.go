@@ -2,6 +2,9 @@ package scanner
 
 import "fmt"
 
+// Version is the Fluxgate release version. Bump in lockstep with git tags.
+const Version = "0.7.3"
+
 // Severity levels for findings.
 const (
 	SeverityCritical = "critical"

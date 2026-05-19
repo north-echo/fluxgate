@@ -2,6 +2,8 @@ package scanner
 
 import pkgscanner "github.com/north-echo/fluxgate/pkg/scanner"
 
+const Version = pkgscanner.Version
+
 var ScanWorkflow = pkgscanner.ScanWorkflow
 var ScanWorkflowBytes = pkgscanner.ScanWorkflowBytes
 var ScanFile = pkgscanner.ScanFile
