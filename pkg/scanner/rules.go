@@ -3161,3 +3161,92 @@ func CheckGitHubEnvInjection(wf *Workflow) []Finding {
 	}
 	return findings
 }
+
+// iocEntry is a known threat-actor indicator that, if observed in workflow
+// content, is high-confidence evidence of compromise (not a heuristic).
+type iocEntry struct {
+	Needle   string // substring to match (case-insensitive)
+	Campaign string // short campaign tag for the finding message
+	Note     string // one-line explanation of what the indicator means
+}
+
+// knownIOCs is the catalog of substrings to flag in workflow Run blocks, env
+// values, and With inputs. Keep entries narrow enough to avoid false positives
+// — these emit critical findings.
+var knownIOCs = []iocEntry{
+	{
+		Needle:   "m-kosche.com",
+		Campaign: "Mini Shai-Hulud / TeamPCP (May 2026)",
+		Note:     "C2/exfil domain for the actions-cool + atool/prop npm maintainer compromise; payload reads Runner.Worker memory and posts masked secrets to t.m-kosche.com",
+	},
+	{
+		Needle:   "IfYouInvalidateThisTokenItWillNukeTheComputerOfTheOwner",
+		Campaign: "Mini Shai-Hulud / TeamPCP (May 2026)",
+		Note:     "Threat-actor commit fingerprint string used across attacker-controlled repos",
+	},
+	{
+		Needle:   "niagA oG eW ereH :duluH-iahS",
+		Campaign: "Mini Shai-Hulud / TeamPCP (May 2026)",
+		Note:     "Reversed 'Shai-Hulud: Here We Go Again' marker used in 2,500+ attacker-created repos",
+	},
+}
+
+// CheckKnownIOCs flags exact threat-actor indicators in workflow run blocks,
+// env values, and with: inputs (FG-025). Hits are critical and high-confidence
+// — only catalog needles tightly tied to a known campaign.
+func CheckKnownIOCs(wf *Workflow) []Finding {
+	var findings []Finding
+	for jobName, job := range wf.Jobs {
+		for _, step := range job.Steps {
+			haystacks := []struct {
+				where string
+				text  string
+			}{
+				{"run block", step.Run},
+				{"uses ref", step.Uses},
+			}
+			for k, v := range step.Env {
+				haystacks = append(haystacks, struct {
+					where string
+					text  string
+				}{fmt.Sprintf("env.%s", k), v})
+			}
+			for k, v := range step.With {
+				haystacks = append(haystacks, struct {
+					where string
+					text  string
+				}{fmt.Sprintf("with.%s", k), v})
+			}
+
+			for _, ioc := range knownIOCs {
+				needle := strings.ToLower(ioc.Needle)
+				for _, h := range haystacks {
+					if h.text == "" {
+						continue
+					}
+					if !strings.Contains(strings.ToLower(h.text), needle) {
+						continue
+					}
+					findings = append(findings, Finding{
+						RuleID:   "FG-025",
+						Severity: SeverityCritical,
+						File:     wf.Path,
+						Line:     step.Line,
+						Message: fmt.Sprintf(
+							"Known IOC: %q matched in job %s %s — %s",
+							ioc.Needle, jobName, h.where, ioc.Campaign),
+						Details: ioc.Note + ". Treat the repo as compromised: assume any secrets " +
+							"exposed to this workflow are exfiltrated, rotate credentials, audit " +
+							"runner activity, and revert the offending change.",
+						Mitigations: []string{
+							"Rotate all secrets exposed to this workflow",
+							"Audit recent commits and CI run history for the campaign window",
+							"Remove the offending content and re-scan",
+						},
+					})
+				}
+			}
+		}
+	}
+	return findings
+}

