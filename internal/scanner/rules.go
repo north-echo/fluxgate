@@ -32,6 +32,9 @@ var CheckRefConfusion = pkgscanner.CheckRefConfusion
 var CheckCrossStepOutputTaint = pkgscanner.CheckCrossStepOutputTaint
 var CheckKnownVulnerableActions = pkgscanner.CheckKnownVulnerableActions
 var CheckArtifactCredentialLeak = pkgscanner.CheckArtifactCredentialLeak
+var CheckGitHubEnvInjection = pkgscanner.CheckGitHubEnvInjection
+var CheckKnownIOCs = pkgscanner.CheckKnownIOCs
+var CheckLifecycleInstallBeforeCredentialedOperation = pkgscanner.CheckLifecycleInstallBeforeCredentialedOperation
 
 // Re-export types used in tests
 type MitigationAnalysis = pkgscanner.MitigationAnalysis

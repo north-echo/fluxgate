@@ -3,6 +3,7 @@ package scanner
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -10,11 +11,13 @@ import (
 
 // Workflow represents a parsed GitHub Actions workflow file.
 type Workflow struct {
-	Name        string
-	Path        string
-	On          TriggerConfig
-	Permissions PermissionsConfig
-	Jobs        map[string]Job
+	Name             string
+	Path             string
+	On               TriggerConfig
+	Env              map[string]string
+	NPMIgnoreScripts bool
+	Permissions      PermissionsConfig
+	Jobs             map[string]Job
 }
 
 // TriggerConfig captures which events trigger the workflow.
@@ -24,6 +27,7 @@ type TriggerConfig struct {
 	PullRequest            bool
 	IssueComment           bool
 	WorkflowRun            bool
+	WorkflowDispatch       bool
 	Push                   bool
 	Issues                 bool
 }
@@ -47,6 +51,7 @@ type Job struct {
 	Name        string
 	If          string // raw if: conditional string
 	Environment string // environment protection name, if set
+	Env         map[string]string
 	Permissions PermissionsConfig
 	Steps       []Step
 	Secrets     string   // "inherit" or empty
@@ -72,20 +77,22 @@ type Step struct {
 type rawWorkflow struct {
 	Name        string            `yaml:"name"`
 	On          yaml.Node         `yaml:"on"`
+	Env         map[string]string `yaml:"env"`
 	Permissions yaml.Node         `yaml:"permissions"`
 	Jobs        map[string]rawJob `yaml:"jobs"`
 }
 
 type rawJob struct {
-	Name        string              `yaml:"name"`
-	If          string              `yaml:"if"`
-	Environment yaml.Node           `yaml:"environment"`
-	Permissions yaml.Node           `yaml:"permissions"`
-	Steps       []rawStep           `yaml:"steps"`
-	Secrets     string              `yaml:"secrets"`
-	Needs       yaml.Node           `yaml:"needs"`
-	RunsOn      yaml.Node           `yaml:"runs-on"`
-	Container   yaml.Node           `yaml:"container"`
+	Name        string               `yaml:"name"`
+	If          string               `yaml:"if"`
+	Environment yaml.Node            `yaml:"environment"`
+	Env         map[string]string    `yaml:"env"`
+	Permissions yaml.Node            `yaml:"permissions"`
+	Steps       []rawStep            `yaml:"steps"`
+	Secrets     string               `yaml:"secrets"`
+	Needs       yaml.Node            `yaml:"needs"`
+	RunsOn      yaml.Node            `yaml:"runs-on"`
+	Container   yaml.Node            `yaml:"container"`
 	Services    map[string]yaml.Node `yaml:"services"`
 }
 
@@ -105,7 +112,12 @@ func ParseWorkflowFile(path string) (*Workflow, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", path, err)
 	}
-	return ParseWorkflow(data, path)
+	wf, err := ParseWorkflow(data, path)
+	if err != nil {
+		return nil, err
+	}
+	wf.NPMIgnoreScripts = repoNPMIgnoreScripts(path)
+	return wf, nil
 }
 
 // ParseWorkflow parses workflow YAML content.
@@ -130,6 +142,7 @@ func ParseWorkflow(data []byte, path string) (*Workflow, error) {
 		Name:        raw.Name,
 		Path:        path,
 		On:          parseTriggers(&raw.On),
+		Env:         raw.Env,
 		Permissions: parsePermissions(&raw.Permissions),
 		Jobs:        make(map[string]Job),
 	}
@@ -142,6 +155,7 @@ func ParseWorkflow(data []byte, path string) (*Workflow, error) {
 			Name:        rawJ.Name,
 			If:          rawJ.If,
 			Environment: parseEnvironment(&rawJ.Environment),
+			Env:         rawJ.Env,
 			Permissions: parsePermissions(&rawJ.Permissions),
 			Secrets:     rawJ.Secrets,
 			Needs:       parseNeeds(&rawJ.Needs),
@@ -263,6 +277,8 @@ func applyTrigger(tc *TriggerConfig, trigger string) {
 		tc.IssueComment = true
 	case "workflow_run":
 		tc.WorkflowRun = true
+	case "workflow_dispatch":
+		tc.WorkflowDispatch = true
 	case "push":
 		tc.Push = true
 	case "issues":
@@ -458,6 +474,57 @@ func AccessesSecrets(job Job) bool {
 			if strings.Contains(v, "secrets.") {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func repoNPMIgnoreScripts(workflowPath string) bool {
+	for _, dir := range npmConfigCandidateDirs(workflowPath) {
+		data, err := os.ReadFile(filepath.Join(dir, ".npmrc"))
+		if err != nil {
+			continue
+		}
+		if npmrcIgnoreScripts(data) {
+			return true
+		}
+	}
+	return false
+}
+
+func npmConfigCandidateDirs(workflowPath string) []string {
+	workflowDir := filepath.Dir(workflowPath)
+	candidates := []string{workflowDir}
+	if filepath.Base(workflowDir) == "workflows" && filepath.Base(filepath.Dir(workflowDir)) == ".github" {
+		candidates = append(candidates, filepath.Dir(filepath.Dir(workflowDir)))
+	}
+
+	seen := make(map[string]bool, len(candidates))
+	var dirs []string
+	for _, dir := range candidates {
+		if dir == "" || seen[dir] {
+			continue
+		}
+		seen[dir] = true
+		dirs = append(dirs, dir)
+	}
+	return dirs
+}
+
+func npmrcIgnoreScripts(data []byte) bool {
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(strings.ToLower(parts[0]))
+		val := strings.TrimSpace(strings.ToLower(parts[1]))
+		if key == "ignore-scripts" && (val == "true" || val == "1") {
+			return true
 		}
 	}
 	return false

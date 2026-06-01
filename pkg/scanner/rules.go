@@ -16,19 +16,19 @@ type ExecutionAnalysis struct {
 
 // MitigationAnalysis captures defensive controls detected on a workflow/job.
 type MitigationAnalysis struct {
-	LabelGated       bool
-	EnvironmentGated bool
-	MaintainerCheck  bool
-	ForkGuard        bool
-	ActorGuard       bool // Job if: restricts execution to specific bot actor(s)
-	ActorGuardHuman  bool // Job if: restricts to specific human actor(s) (weaker)
-	NeedsGate          bool // Job depends on upstream job with environment/fork gate
-	TokenBlanked       bool
-	PathIsolated       bool // Fork code checked out to subdirectory, no direct execution
-	TrustedRefIsolated bool // Fork checkout to subdir, all executed code from trusted ref
-	PermissionGateJob  bool // Upstream job verifies collaborator permissions via API
+	LabelGated          bool
+	EnvironmentGated    bool
+	MaintainerCheck     bool
+	ForkGuard           bool
+	ActorGuard          bool // Job if: restricts execution to specific bot actor(s)
+	ActorGuardHuman     bool // Job if: restricts to specific human actor(s) (weaker)
+	NeedsGate           bool // Job depends on upstream job with environment/fork gate
+	TokenBlanked        bool
+	PathIsolated        bool // Fork code checked out to subdirectory, no direct execution
+	TrustedRefIsolated  bool // Fork checkout to subdir, all executed code from trusted ref
+	PermissionGateJob   bool // Upstream job verifies collaborator permissions via API
 	BuildBeforeCheckout bool // Binary compiled from base branch BEFORE PR code checkout
-	Details            []string
+	Details             []string
 }
 
 // Build tools that definitely execute code from the working directory.
@@ -70,7 +70,7 @@ var safeFormattingTools = []string{
 	"rustfmt",
 	"clang-format",
 	"shfmt",
-	"prettier",   // config is JSON/YAML-only, no plugin execution
+	"prettier", // config is JSON/YAML-only, no plugin execution
 	"markdownlint",
 }
 
@@ -3249,4 +3249,390 @@ func CheckKnownIOCs(wf *Workflow) []Finding {
 		}
 	}
 	return findings
+}
+
+type lifecycleInstall struct {
+	step      Step
+	index     int
+	ecosystem string
+	command   string
+}
+
+type credentialedOperation struct {
+	step      Step
+	index     int
+	kind      string
+	ecosystem string
+	command   string
+}
+
+var npmInstallPattern = regexp.MustCompile(`(?i)(^|[\s;&|()])npm\s+(install|i|ci)\b`)
+var yarnInstallPattern = regexp.MustCompile(`(?i)(^|[\s;&|()])yarn(\s+install\b|\s+--|\s*$)`)
+var pnpmInstallPattern = regexp.MustCompile(`(?i)(^|[\s;&|()])pnpm\s+(install|i)\b`)
+var pipInstallPattern = regexp.MustCompile(`(?i)(^|[\s;&|()])(python[0-9.]*\s+-m\s+)?pip\s+install\b`)
+var gemInstallPattern = regexp.MustCompile(`(?i)(^|[\s;&|()])(gem\s+install|bundle\s+install)\b`)
+
+var npmPublishPattern = regexp.MustCompile(`(?i)(^|[\s;&|()])(npm\s+publish|pnpm\s+publish|yarn\s+npm\s+publish)\b`)
+var pypiPublishPattern = regexp.MustCompile(`(?i)(^|[\s;&|()])((python[0-9.]*\s+-m\s+)?twine\s+upload|uv\s+publish|poetry\s+publish|pdm\s+publish|hatch\s+publish)\b`)
+var gemPublishPattern = regexp.MustCompile(`(?i)(^|[\s;&|()])((bundle\s+exec\s+)?gem\s+push|rake\s+release)\b`)
+var ghReleasePattern = regexp.MustCompile(`(?i)(^|[\s;&|()])gh\s+release\s+(create|upload)\b`)
+
+// CheckLifecycleInstallBeforeCredentialedOperation detects package manager
+// install steps that can execute dependency lifecycle/build scripts before a
+// later publish, cloud-auth, or release operation in the same credential
+// context (FG-026).
+func CheckLifecycleInstallBeforeCredentialedOperation(wf *Workflow) []Finding {
+	var findings []Finding
+
+	for jobName, job := range wf.Jobs {
+		installs := lifecycleInstalls(wf, job)
+		if len(installs) == 0 {
+			continue
+		}
+
+		ops := credentialedOperations(wf, job)
+		if len(ops) == 0 {
+			continue
+		}
+
+		for _, install := range installs {
+			op, ok := firstOperationAfter(install, ops)
+			if !ok {
+				continue
+			}
+
+			severity, reason := lifecycleCredentialSeverity(wf, job, op.step)
+
+			msg := fmt.Sprintf(
+				"Lifecycle Install Before Credentialed Operation: %s install runs before %s in job '%s'",
+				install.ecosystem, op.kind, jobName)
+			if reason != "" {
+				msg += " (" + reason + ")"
+			}
+
+			findings = append(findings, Finding{
+				RuleID:   "FG-026",
+				Severity: severity,
+				File:     wf.Path,
+				Line:     install.step.Line,
+				Message:  msg,
+				Details: fmt.Sprintf(
+					"The %s command %q can execute package lifecycle/build scripts before later %s %q at line %d in the same job. "+
+						"Compromised dependencies can harvest publish tokens, OIDC-minted cloud credentials, release credentials, or repository tokens from that job context.",
+					install.ecosystem, install.command, op.kind, op.command, op.step.Line),
+				Mitigations: lifecycleInstallMitigations(install.ecosystem),
+			})
+		}
+	}
+
+	return findings
+}
+
+func lifecycleInstalls(wf *Workflow, job Job) []lifecycleInstall {
+	var installs []lifecycleInstall
+	for i, step := range job.Steps {
+		if step.Uses != "" {
+			action := strings.ToLower(actionName(step.Uses))
+			if action == "bahmutov/npm-install" {
+				if !actionInstallSuppressed(step, "bahmutov/npm-install") &&
+					!installScriptsSuppressed(wf, step, job, "npm") {
+					cmd := step.With["install-command"]
+					if cmd == "" {
+						cmd = "bahmutov/npm-install"
+					}
+					installs = append(installs, lifecycleInstall{step: step, index: i, ecosystem: "npm", command: cmd})
+				}
+				continue
+			}
+		}
+		if step.Run == "" {
+			continue
+		}
+		if npmInstallPattern.MatchString(step.Run) {
+			if installScriptsSuppressed(wf, step, job, "npm") {
+				continue
+			}
+			installs = append(installs, lifecycleInstall{step: step, index: i, ecosystem: "npm", command: matchedCommand(step.Run, npmInstallPattern)})
+			continue
+		}
+		if yarnInstallPattern.MatchString(step.Run) && !strings.Contains(strings.ToLower(step.Run), "yarn npm publish") {
+			if installScriptsSuppressed(wf, step, job, "yarn") {
+				continue
+			}
+			installs = append(installs, lifecycleInstall{step: step, index: i, ecosystem: "yarn", command: matchedCommand(step.Run, yarnInstallPattern)})
+			continue
+		}
+		if pnpmInstallPattern.MatchString(step.Run) {
+			if installScriptsSuppressed(wf, step, job, "pnpm") {
+				continue
+			}
+			installs = append(installs, lifecycleInstall{step: step, index: i, ecosystem: "pnpm", command: matchedCommand(step.Run, pnpmInstallPattern)})
+			continue
+		}
+		if pipInstallPattern.MatchString(step.Run) {
+			installs = append(installs, lifecycleInstall{step: step, index: i, ecosystem: "pip", command: matchedCommand(step.Run, pipInstallPattern)})
+			continue
+		}
+		if gemInstallPattern.MatchString(step.Run) {
+			installs = append(installs, lifecycleInstall{step: step, index: i, ecosystem: "gem", command: matchedCommand(step.Run, gemInstallPattern)})
+			continue
+		}
+	}
+	return installs
+}
+
+// actionInstallSuppressed returns true when a known install action carries an
+// inline mitigation in its with: inputs (e.g. install-command: "npm ci --ignore-scripts").
+func actionInstallSuppressed(step Step, action string) bool {
+	if action == "bahmutov/npm-install" {
+		cmd := strings.ToLower(step.With["install-command"])
+		if strings.Contains(cmd, "--ignore-scripts") || strings.Contains(cmd, "ignore-scripts=true") {
+			return true
+		}
+	}
+	return false
+}
+
+func installScriptsSuppressed(wf *Workflow, step Step, job Job, ecosystem string) bool {
+	if wf.NPMIgnoreScripts && (ecosystem == "npm" || ecosystem == "pnpm") {
+		return true
+	}
+	runLower := strings.ToLower(step.Run)
+	if strings.Contains(runLower, "--ignore-scripts=false") ||
+		strings.Contains(runLower, "ignore-scripts=false") {
+		return false
+	}
+	if strings.Contains(runLower, "--ignore-scripts") ||
+		strings.Contains(runLower, "ignore-scripts=true") ||
+		strings.Contains(runLower, "npm config set ignore-scripts true") ||
+		strings.Contains(runLower, "pnpm config set ignore-scripts true") {
+		return true
+	}
+	for k, v := range mergeEnv(job.Env, step.Env) {
+		key := strings.ToUpper(k)
+		val := strings.ToLower(strings.TrimSpace(v))
+		if (key == "NPM_CONFIG_IGNORE_SCRIPTS" || key == "PNPM_CONFIG_IGNORE_SCRIPTS") &&
+			(val == "true" || val == "1") {
+			return true
+		}
+		if key == "YARN_ENABLE_SCRIPTS" && (val == "false" || val == "0") {
+			return true
+		}
+	}
+	return false
+}
+
+func credentialedOperations(wf *Workflow, job Job) []credentialedOperation {
+	var ops []credentialedOperation
+	for i, step := range job.Steps {
+		if step.Run != "" {
+			switch {
+			case npmPublishPattern.MatchString(step.Run):
+				ops = append(ops, credentialedOperation{step: step, index: i, kind: "npm publish", ecosystem: "npm", command: matchedCommand(step.Run, npmPublishPattern)})
+			case pypiPublishPattern.MatchString(step.Run):
+				ops = append(ops, credentialedOperation{step: step, index: i, kind: "PyPI publish", ecosystem: "pip", command: matchedCommand(step.Run, pypiPublishPattern)})
+			case gemPublishPattern.MatchString(step.Run):
+				ops = append(ops, credentialedOperation{step: step, index: i, kind: "RubyGems publish", ecosystem: "gem", command: matchedCommand(step.Run, gemPublishPattern)})
+			case ghReleasePattern.MatchString(step.Run):
+				if effectivePermission(wf, job, "contents") == "write" || hasCredentialEnv(wf, job, step) || HasElevatedPermissions(wf.Permissions, job.Permissions) {
+					ops = append(ops, credentialedOperation{step: step, index: i, kind: "GitHub release", command: matchedCommand(step.Run, ghReleasePattern)})
+				}
+			}
+		}
+
+		if step.Uses != "" {
+			action := strings.ToLower(actionName(step.Uses))
+			switch action {
+			case "aws-actions/configure-aws-credentials",
+				"google-github-actions/auth",
+				"azure/login",
+				"hashicorp/vault-action":
+				if effectivePermission(wf, job, "id-token") == "write" || hasCredentialEnv(wf, job, step) {
+					ops = append(ops, credentialedOperation{step: step, index: i, kind: "cloud auth", command: action})
+				}
+			case "softprops/action-gh-release",
+				"actions/upload-release-asset",
+				"ncipollo/release-action":
+				if effectivePermission(wf, job, "contents") == "write" || hasCredentialEnv(wf, job, step) || HasElevatedPermissions(wf.Permissions, job.Permissions) {
+					ops = append(ops, credentialedOperation{step: step, index: i, kind: "GitHub release", command: action})
+				}
+			case "js-devtools/npm-publish":
+				ops = append(ops, credentialedOperation{step: step, index: i, kind: "npm publish", ecosystem: "npm", command: action})
+			case "pypa/gh-action-pypi-publish":
+				ops = append(ops, credentialedOperation{step: step, index: i, kind: "PyPI publish", ecosystem: "pip", command: action})
+			case "rubygems/release-gem":
+				ops = append(ops, credentialedOperation{step: step, index: i, kind: "RubyGems publish", ecosystem: "gem", command: action})
+			}
+		}
+	}
+	return ops
+}
+
+func firstOperationAfter(install lifecycleInstall, ops []credentialedOperation) (credentialedOperation, bool) {
+	for _, op := range ops {
+		if op.index > install.index {
+			return op, true
+		}
+	}
+	return credentialedOperation{}, false
+}
+
+// lifecycleCredentialSeverity tiers the FG-026 finding by trigger + defense-
+// in-depth signals. Environment gate and tag-ref guard each reduce severity by
+// one step; absent both, the trigger's base severity applies. Tag-ref guard
+// restricts the credentialed path to tag pushes (which require repo write
+// access), folding the FG-027 "weakly constrained trusted publishing" case
+// into FG-026 instead of producing a separate finding.
+func lifecycleCredentialSeverity(wf *Workflow, job Job, op Step) (string, string) {
+	hasEnvGate := job.Environment != ""
+	hasTag := hasTagGuard(job, op)
+
+	var sev, triggerLabel string
+	switch {
+	case wf.On.WorkflowRun || wf.On.PullRequestTarget || wf.On.IssueComment:
+		triggerLabel = "external trigger"
+		if hasEnvGate {
+			sev = SeverityHigh
+		} else {
+			sev = SeverityCritical
+		}
+	case wf.On.WorkflowDispatch:
+		triggerLabel = "manual trigger"
+		if hasEnvGate {
+			sev = SeverityMedium
+		} else {
+			sev = SeverityCritical
+		}
+	default:
+		triggerLabel = "internal trigger"
+		if hasEnvGate {
+			sev = SeverityMedium
+		} else {
+			sev = SeverityHigh
+		}
+	}
+
+	if hasTag {
+		sev = downgradeBy(sev, 1)
+	}
+
+	gates := []string{}
+	if hasEnvGate {
+		gates = append(gates, "environment gate")
+	}
+	if hasTag {
+		gates = append(gates, "tag-ref guard")
+	}
+	reason := triggerLabel
+	if len(gates) > 0 {
+		reason += " with " + strings.Join(gates, " + ")
+	} else {
+		reason += " without environment or tag guard"
+	}
+	return sev, reason
+}
+
+func hasTagGuard(job Job, op Step) bool {
+	guards := []string{job.If, op.If}
+	for _, guard := range guards {
+		g := strings.ToLower(strings.ReplaceAll(guard, " ", ""))
+		if strings.Contains(g, "refs/tags/") ||
+			strings.Contains(g, "github.ref_type=='tag'") ||
+			strings.Contains(g, `github.ref_type=="tag"`) ||
+			strings.Contains(g, "github.ref.startswith('refs/tags/')") ||
+			strings.Contains(g, `github.ref.startswith("refs/tags/")`) ||
+			strings.Contains(g, "startswith(github.ref,'refs/tags/')") ||
+			strings.Contains(g, `startswith(github.ref,"refs/tags/")`) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasCredentialEnv(wf *Workflow, job Job, step Step) bool {
+	for k, v := range mergeEnv(wf.Env, mergeEnv(job.Env, step.Env)) {
+		key := strings.ToUpper(k)
+		val := strings.ToLower(v)
+		if strings.Contains(key, "TOKEN") ||
+			strings.Contains(key, "PASSWORD") ||
+			strings.Contains(key, "SECRET") ||
+			key == "GEM_HOST_API_KEY" ||
+			key == "RUBYGEMS_API_KEY" ||
+			key == "TWINE_USERNAME" ||
+			key == "TWINE_PASSWORD" {
+			return true
+		}
+		if strings.Contains(val, "secrets.") {
+			return true
+		}
+	}
+	return false
+}
+
+func effectivePermission(wf *Workflow, job Job, scope string) string {
+	if job.Permissions.Scopes != nil {
+		if v, ok := job.Permissions.Scopes[scope]; ok {
+			return v
+		}
+	}
+	if wf.Permissions.Scopes != nil {
+		if v, ok := wf.Permissions.Scopes[scope]; ok {
+			return v
+		}
+	}
+	if job.Permissions.WriteAll || wf.Permissions.WriteAll {
+		return "write"
+	}
+	return ""
+}
+
+func mergeEnv(a, b map[string]string) map[string]string {
+	merged := make(map[string]string, len(a)+len(b))
+	for k, v := range a {
+		merged[k] = v
+	}
+	for k, v := range b {
+		merged[k] = v
+	}
+	return merged
+}
+
+func actionName(uses string) string {
+	if idx := strings.Index(uses, "@"); idx != -1 {
+		return uses[:idx]
+	}
+	return uses
+}
+
+func matchedCommand(run string, re *regexp.Regexp) string {
+	match := strings.TrimSpace(re.FindString(run))
+	if match == "" {
+		return "install"
+	}
+	return strings.TrimLeft(match, " \t\n\r;&|()")
+}
+
+func lifecycleInstallMitigations(ecosystem string) []string {
+	common := []string{
+		"Run dependency installation in a separate job that has no publish, release, cloud, or repository-write credentials",
+		"Move publish/cloud/release operations behind an environment protection gate",
+		"Restrict publishing to tag-protected releases",
+	}
+	switch ecosystem {
+	case "npm", "yarn", "pnpm":
+		return append([]string{
+			"Use --ignore-scripts or ignore-scripts=true for install steps in credentialed jobs",
+		}, common...)
+	case "pip":
+		return append([]string{
+			"Install build/publish tooling in an isolated job or prebuilt image instead of the publish job",
+			"Prefer wheel-only installs for dependencies where practical",
+		}, common...)
+	case "gem":
+		return append([]string{
+			"Install RubyGems/Bundler dependencies in an isolated job or prebuilt image instead of the publish job",
+		}, common...)
+	default:
+		return common
+	}
 }

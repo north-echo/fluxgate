@@ -1,6 +1,8 @@
 package scanner
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -441,11 +443,153 @@ func TestCheckKnownIOCs_NoFalsePositive(t *testing.T) {
 	}
 }
 
+// --- FG-026: Lifecycle Install Before Credentialed Operation ---
+
+func TestCheckLifecycleInstallBeforeCredentialedOperation(t *testing.T) {
+	wf, err := ParseWorkflowFile("../../test/fixtures/lifecycle-install-before-publish.yaml")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	findings := CheckLifecycleInstallBeforeCredentialedOperation(wf)
+	if len(findings) != 4 {
+		t.Fatalf("expected 4 findings, got %d: %v", len(findings), findings)
+	}
+
+	seen := map[string]bool{}
+	for _, f := range findings {
+		if f.RuleID != "FG-026" {
+			t.Errorf("expected FG-026, got %s", f.RuleID)
+		}
+		switch {
+		case strings.Contains(f.Message, "npm-critical"):
+			seen["npm"] = true
+			if f.Severity != SeverityCritical {
+				t.Errorf("expected critical for external-trigger npm job, got %s", f.Severity)
+			}
+		case strings.Contains(f.Message, "pypi-medium"):
+			seen["pip"] = true
+			if !strings.Contains(f.Message, "pip") {
+				t.Errorf("expected pip ecosystem in message, got %s", f.Message)
+			}
+		case strings.Contains(f.Message, "gem-medium"):
+			seen["gem"] = true
+			if !strings.Contains(f.Message, "gem") {
+				t.Errorf("expected gem ecosystem in message, got %s", f.Message)
+			}
+		case strings.Contains(f.Message, "action-install-action-publish"):
+			seen["action"] = true
+			if !strings.Contains(f.Message, "npm publish") {
+				t.Errorf("expected action-based npm publish in message, got %s", f.Message)
+			}
+		case strings.Contains(f.Message, "npm-ignore-scripts"),
+			strings.Contains(f.Message, "npm-npmrc-ignore-scripts"),
+			strings.Contains(f.Message, "separated-install"),
+			strings.Contains(f.Message, "publish-only"),
+			strings.Contains(f.Message, "action-install-suppressed"):
+			t.Errorf("unexpected finding for mitigated/separate job: %s", f.Message)
+		}
+	}
+	if !seen["npm"] || !seen["pip"] || !seen["gem"] || !seen["action"] {
+		t.Errorf("expected npm, pip, gem, and action-based findings, saw %v", seen)
+	}
+}
+
+func TestCheckLifecycleInstallBeforeCredentialedOperation_SeverityTiers(t *testing.T) {
+	makeWorkflow := func(env string, dispatch bool, jobIf string) *Workflow {
+		wf := &Workflow{
+			Path: "release.yaml",
+			On:   TriggerConfig{Push: true},
+			Permissions: PermissionsConfig{
+				Set:    true,
+				Scopes: map[string]string{"contents": "read"},
+			},
+			Jobs: map[string]Job{
+				"release": {
+					Environment: env,
+					If:          jobIf,
+					Steps: []Step{
+						{Run: "npm ci", Line: 10},
+						{Run: "npm publish", Line: 12, Env: map[string]string{"NODE_AUTH_TOKEN": "${{ secrets.NPM_TOKEN }}"}},
+					},
+				},
+			},
+		}
+		if dispatch {
+			wf.On = TriggerConfig{WorkflowDispatch: true}
+		}
+		return wf
+	}
+
+	tagGuard := "startsWith(github.ref, 'refs/tags/')"
+
+	cases := []struct {
+		name     string
+		wf       *Workflow
+		expected string
+	}{
+		{"push no environment", makeWorkflow("", false, ""), SeverityHigh},
+		{"push with environment", makeWorkflow("npm", false, ""), SeverityMedium},
+		{"push with tag guard", makeWorkflow("", false, tagGuard), SeverityMedium},
+		{"push with environment and tag guard", makeWorkflow("npm", false, tagGuard), SeverityLow},
+		{"dispatch no environment", makeWorkflow("", true, ""), SeverityCritical},
+		{"dispatch with environment", makeWorkflow("npm", true, ""), SeverityMedium},
+		{"dispatch with tag guard", makeWorkflow("", true, tagGuard), SeverityHigh},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			findings := CheckLifecycleInstallBeforeCredentialedOperation(tc.wf)
+			if len(findings) != 1 {
+				t.Fatalf("expected 1 finding, got %d: %v", len(findings), findings)
+			}
+			if findings[0].Severity != tc.expected {
+				t.Fatalf("expected %s, got %s", tc.expected, findings[0].Severity)
+			}
+		})
+	}
+}
+
+func TestCheckLifecycleInstallBeforeCredentialedOperation_RepoNPMRC(t *testing.T) {
+	dir := t.TempDir()
+	workflowDir := filepath.Join(dir, ".github", "workflows")
+	if err := os.MkdirAll(workflowDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".npmrc"), []byte("ignore-scripts=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	workflow := []byte(`name: release
+on: push
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm ci
+      - run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+`)
+	path := filepath.Join(workflowDir, "release.yaml")
+	if err := os.WriteFile(path, workflow, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	wf, err := ParseWorkflowFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings := CheckLifecycleInstallBeforeCredentialedOperation(wf)
+	if len(findings) != 0 {
+		t.Fatalf("expected repo .npmrc ignore-scripts=true to suppress finding, got %d: %v", len(findings), findings)
+	}
+}
+
 // --- AllRules completeness ---
 
 func TestAllRules_IncludesNewRules(t *testing.T) {
 	rules := AllRules()
-	expectedIDs := []string{"FG-018", "FG-019", "FG-020", "FG-021", "FG-022", "FG-023", "FG-024", "FG-025"}
+	expectedIDs := []string{"FG-018", "FG-019", "FG-020", "FG-021", "FG-022", "FG-023", "FG-024", "FG-025", "FG-026"}
 	for _, id := range expectedIDs {
 		if _, ok := rules[id]; !ok {
 			t.Errorf("AllRules() missing %s", id)

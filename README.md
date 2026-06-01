@@ -49,6 +49,9 @@ go install github.com/north-echo/fluxgate/cmd/fluxgate@latest
 | FG-021  | Medium   | Cross-step output taint |
 | FG-022  | High     | Known vulnerable action version |
 | FG-023  | High     | Artifact credential leak |
+| FG-024  | High     | GitHub environment file injection |
+| FG-025  | Critical | Known threat-actor IOC |
+| FG-026  | High     | Lifecycle install before credentialed operation |
 
 ### GitLab CI (GL-xxx)
 
@@ -105,7 +108,7 @@ go install github.com/north-echo/fluxgate/cmd/fluxgate@latest
 | CC-003  | Medium   | Unpinned orb versions |
 | CC-009  | High     | Self-hosted runner on fork PRs |
 
-**53 rules across 6 CI/CD platforms.**
+**56 rules across 6 CI/CD platforms.**
 
 ## Why This Exists
 

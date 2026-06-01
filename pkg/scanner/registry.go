@@ -31,6 +31,7 @@ func AllRules() map[string]Rule {
 		"FG-023": CheckArtifactCredentialLeak,
 		"FG-024": CheckGitHubEnvInjection,
 		"FG-025": CheckKnownIOCs,
+		"FG-026": CheckLifecycleInstallBeforeCredentialedOperation,
 	}
 }
 
@@ -61,4 +62,5 @@ var RuleDescriptions = map[string]string{
 	"FG-023": "Artifact Credential Leak",
 	"FG-024": "GitHub Env Injection",
 	"FG-025": "Known Threat-Actor IOC",
+	"FG-026": "Lifecycle Install Before Credentialed Operation",
 }

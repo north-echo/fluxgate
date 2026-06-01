@@ -2,7 +2,7 @@
 
 ## Project
 
-Fluxgate is a CI/CD pipeline security static analysis tool with **53 detection rules across 6 platforms** (GitHub Actions, GitLab CI, Azure Pipelines, Jenkins, Tekton, CircleCI). Current version: **v0.7.0**.
+Fluxgate is a CI/CD pipeline security static analysis tool with **56 detection rules across 6 platforms** (GitHub Actions, GitLab CI, Azure Pipelines, Jenkins, Tekton, CircleCI). Current version: **v0.7.4**.
 
 ## Security Boundaries
 
