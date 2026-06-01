@@ -3478,18 +3478,20 @@ func firstOperationAfter(install lifecycleInstall, ops []credentialedOperation) 
 }
 
 // lifecycleCredentialSeverity tiers the FG-026 finding by trigger + defense-
-// in-depth signals. Environment gate, tag-ref guard, and author-association
-// guard each reduce severity by one step; absent all, the trigger's base
-// severity applies. When the install step's own if: excludes the fork-PR
-// branch (claude-code-action / Backstage-style workflows), pull_request_target
-// is removed from the external-trigger tier consideration. Tag-ref guard
-// restricts the credentialed path to tag pushes (folding the FG-027 weakly-
-// constrained trusted publishing case into FG-026); author-association guard
-// restricts triggers like issue_comment to known contributors only.
+// in-depth signals. Environment gate, tag-ref guard, author-association guard,
+// and user-login allowlist each reduce severity by one step; absent all, the
+// trigger's base severity applies. When the install step's own if: excludes
+// the fork-PR branch (claude-code-action / Backstage-style workflows),
+// pull_request_target is removed from the external-trigger tier consideration.
+// Tag-only push (`on: push: tags:`) and release events (`on: release:`)
+// restrict the credentialed path to repo-writer actions and use the internal-
+// trigger tier instead of external. Tag-ref guard at the job level folds the
+// FG-027 weakly-constrained trusted publishing case into FG-026; author
+// guards restrict triggers like issue_comment to known contributors only.
 func lifecycleCredentialSeverity(wf *Workflow, job Job, install Step, op Step) (string, string) {
 	hasEnvGate := job.Environment != ""
 	hasTag := hasTagGuard(job, op)
-	hasAuthor := hasAuthorAssociationGuard(job)
+	hasAuthor := hasAuthorAssociationGuard(job) || hasUserLoginAllowlist(job)
 	forkExcluded := installStepExcludesForks(install) && wf.On.PullRequestTarget
 
 	// Drop pull_request_target from the external set when the install step
@@ -3498,6 +3500,13 @@ func lifecycleCredentialSeverity(wf *Workflow, job Job, install Step, op Step) (
 	if !forkExcluded && wf.On.PullRequestTarget {
 		externalTrigger = true
 	}
+
+	// Tag-only push (`on: push: tags:`) and `on: release:` are repo-writer-
+	// gated paths: only contributors with tag-create or release-create
+	// permission can trigger. When push is tag-only AND there is no other
+	// branch-push surface, treat as internal-trigger tier (not external).
+	// Release-event-only or release+workflow_call falls into the same bucket.
+	hasGatedTrigger := (wf.On.Push && wf.On.PushTagsOnly) || wf.On.Release
 
 	var sev, triggerLabel string
 	switch {
@@ -3508,12 +3517,21 @@ func lifecycleCredentialSeverity(wf *Workflow, job Job, install Step, op Step) (
 		} else {
 			sev = SeverityCritical
 		}
-	case wf.On.WorkflowDispatch:
+	case wf.On.WorkflowDispatch && !hasGatedTrigger:
 		triggerLabel = "manual trigger"
 		if hasEnvGate {
 			sev = SeverityMedium
 		} else {
 			sev = SeverityCritical
+		}
+	case hasGatedTrigger:
+		// Tag-only push or release event = repo-writer-only path. Equivalent
+		// in effect to a permission-gate job (FG-001 PermissionGateJob pattern).
+		triggerLabel = "repo-writer trigger"
+		if hasEnvGate {
+			sev = SeverityLow
+		} else {
+			sev = SeverityMedium
 		}
 	default:
 		triggerLabel = "internal trigger"
@@ -3539,10 +3557,16 @@ func lifecycleCredentialSeverity(wf *Workflow, job Job, install Step, op Step) (
 		gates = append(gates, "tag-ref guard")
 	}
 	if hasAuthor {
-		gates = append(gates, "author-association guard")
+		gates = append(gates, "author/login allowlist")
 	}
 	if forkExcluded {
 		gates = append(gates, "step-level fork exclusion")
+	}
+	if wf.On.Push && wf.On.PushTagsOnly {
+		gates = append(gates, "tag-only push")
+	}
+	if wf.On.Release {
+		gates = append(gates, "release event")
 	}
 	reason := triggerLabel
 	if len(gates) > 0 {
@@ -3551,6 +3575,33 @@ func lifecycleCredentialSeverity(wf *Workflow, job Job, install Step, op Step) (
 		reason += " without environment or tag guard"
 	}
 	return sev, reason
+}
+
+// hasUserLoginAllowlist returns true when the job's if: restricts the actor by
+// explicit login allowlist — e.g. `github.event.pull_request.user.login ==
+// 'rhdh-bot'` or `github.actor == 'backstage-service'`. Common in
+// changesets-driven release workflows (community-plugins, rhdh-plugins) where
+// the publish flow only runs on a PR merged by a specific bot account.
+// Treated equivalently to hasAuthorAssociationGuard — one-step downgrade.
+func hasUserLoginAllowlist(job Job) bool {
+	g := strings.ToLower(strings.ReplaceAll(job.If, " ", ""))
+	if g == "" {
+		return false
+	}
+	patterns := []string{
+		"user.login=='",
+		`user.login=="`,
+		"github.actor=='",
+		`github.actor=="`,
+		"sender.login=='",
+		`sender.login=="`,
+	}
+	for _, p := range patterns {
+		if strings.Contains(g, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // installStepExcludesForks returns true when an install step's if: evaluates

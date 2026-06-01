@@ -29,6 +29,8 @@ type TriggerConfig struct {
 	WorkflowRun            bool
 	WorkflowDispatch       bool
 	Push                   bool
+	PushTagsOnly           bool // push is gated to tag refs (no branches:) — repo-writer-only path
+	Release                bool // on: release — only repo writers can create releases
 	Issues                 bool
 }
 
@@ -262,6 +264,25 @@ func parseTriggers(node *yaml.Node) TriggerConfig {
 					}
 				}
 			}
+			// Detect tag-only push: `on: push: tags: [...]` with no branches: key.
+			// A bare `on: push:` (null value) matches all refs and is NOT tag-only.
+			if key == "push" {
+				valNode := node.Content[i+1]
+				if valNode.Kind == yaml.MappingNode {
+					hasTags, hasBranches := false, false
+					for j := 0; j < len(valNode.Content)-1; j += 2 {
+						switch valNode.Content[j].Value {
+						case "tags", "tags-ignore":
+							hasTags = true
+						case "branches", "branches-ignore":
+							hasBranches = true
+						}
+					}
+					if hasTags && !hasBranches {
+						tc.PushTagsOnly = true
+					}
+				}
+			}
 		}
 	}
 	return tc
@@ -281,6 +302,8 @@ func applyTrigger(tc *TriggerConfig, trigger string) {
 		tc.WorkflowDispatch = true
 	case "push":
 		tc.Push = true
+	case "release":
+		tc.Release = true
 	case "issues":
 		tc.Issues = true
 	}

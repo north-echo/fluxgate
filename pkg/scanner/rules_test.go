@@ -628,6 +628,84 @@ func TestCheckLifecycleInstallBeforeCredentialedOperation_ForkExclusionAndAuthor
 	}
 }
 
+func TestCheckLifecycleInstallBeforeCredentialedOperation_RepoWriterTriggers(t *testing.T) {
+	// Synthesizes the most common Red Hat publish-workflow shapes from the
+	// 2026-06-01 org sweep: tag-only push, release event, and the
+	// pull_request:closed + bot-login-allowlist pattern used by rhdh-plugins
+	// and community-plugins.
+	build := func(triggers TriggerConfig, jobIf string) *Workflow {
+		return &Workflow{
+			Path: "release.yaml",
+			On:   triggers,
+			Permissions: PermissionsConfig{
+				Set:    true,
+				Scopes: map[string]string{"contents": "read"},
+			},
+			Jobs: map[string]Job{
+				"release": {
+					If: jobIf,
+					Steps: []Step{
+						{Run: "npm ci", Line: 10},
+						{Run: "npm publish", Line: 12, Env: map[string]string{"NODE_AUTH_TOKEN": "${{ secrets.NPM_TOKEN }}"}},
+					},
+				},
+			},
+		}
+	}
+
+	tagOnlyPush := TriggerConfig{Push: true, PushTagsOnly: true}
+	releaseEvent := TriggerConfig{Release: true}
+	releaseEventWithDispatch := TriggerConfig{Release: true, WorkflowDispatch: true}
+	pushTagsAndBareDispatch := TriggerConfig{Push: true, PushTagsOnly: true, WorkflowDispatch: true}
+	botAllowlist := "github.event.pull_request.user.login == 'rhdh-bot' && github.event.pull_request.merged == true"
+	actorAllowlist := "github.actor == 'backstage-service'"
+	pullRequestClosed := TriggerConfig{PullRequest: true}
+
+	cases := []struct {
+		name     string
+		wf       *Workflow
+		expected string
+	}{
+		// Tag-only push: maps to the yaml-language-server / vscode-extension-* shape.
+		// Repo-writer trigger tier, no other mitigations → medium.
+		{"tag-only push, no env", build(tagOnlyPush, ""), SeverityMedium},
+		{"tag-only push, with env", build(tagOnlyPush, ""), SeverityMedium}, // env added below
+		// Release event: aegis-ai / osidb-bindings / backstage-odo-devfile-plugin shape.
+		{"release event only", build(releaseEvent, ""), SeverityMedium},
+		// Release + workflow_dispatch combined: gated trigger still wins because dispatch
+		// is repo-writer-only too.
+		{"release + dispatch", build(releaseEventWithDispatch, ""), SeverityMedium},
+		// Tag-only push + workflow_dispatch: same — both are repo-writer-only.
+		{"tag-only push + dispatch", build(pushTagsAndBareDispatch, ""), SeverityMedium},
+		// pull_request:closed with bot-login allowlist on job.If — rhdh-plugins
+		// release_workspace_version shape. PR trigger → internal-trigger tier
+		// (PR isn't in our external set), then author-allowlist downgrades → medium.
+		{"PR + bot-login allowlist", build(pullRequestClosed, botAllowlist), SeverityMedium},
+		// github.actor allowlist on a push trigger — same downgrade.
+		{"push + actor allowlist", build(TriggerConfig{Push: true}, actorAllowlist), SeverityMedium},
+	}
+
+	// Patch the "with env" case to add the environment field.
+	cases[1].wf.Jobs["release"] = func() Job {
+		j := cases[1].wf.Jobs["release"]
+		j.Environment = "npm"
+		return j
+	}()
+	cases[1].expected = SeverityLow
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			findings := CheckLifecycleInstallBeforeCredentialedOperation(tc.wf)
+			if len(findings) != 1 {
+				t.Fatalf("expected 1 finding, got %d: %v", len(findings), findings)
+			}
+			if findings[0].Severity != tc.expected {
+				t.Fatalf("expected %s, got %s — reason: %s", tc.expected, findings[0].Severity, findings[0].Message)
+			}
+		})
+	}
+}
+
 func TestCheckLifecycleInstallBeforeCredentialedOperation_RepoNPMRC(t *testing.T) {
 	dir := t.TempDir()
 	workflowDir := filepath.Join(dir, ".github", "workflows")
