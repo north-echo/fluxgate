@@ -550,6 +550,84 @@ func TestCheckLifecycleInstallBeforeCredentialedOperation_SeverityTiers(t *testi
 	}
 }
 
+func TestCheckLifecycleInstallBeforeCredentialedOperation_ForkExclusionAndAuthorGuard(t *testing.T) {
+	// Build a workflow whose only triggers are the requested external set plus a
+	// publish job with an install step that may carry an `if:` (fork-exclusion).
+	build := func(triggers TriggerConfig, jobIf, installIf string) *Workflow {
+		return &Workflow{
+			Path: "release.yaml",
+			On:   triggers,
+			Permissions: PermissionsConfig{
+				Set:    true,
+				Scopes: map[string]string{"contents": "read"},
+			},
+			Jobs: map[string]Job{
+				"release": {
+					If: jobIf,
+					Steps: []Step{
+						{Run: "npm ci", If: installIf, Line: 10},
+						{Run: "npm publish", Line: 12, Env: map[string]string{"NODE_AUTH_TOKEN": "${{ secrets.NPM_TOKEN }}"}},
+					},
+				},
+			},
+		}
+	}
+
+	prt := TriggerConfig{PullRequestTarget: true}
+	prtAndComment := TriggerConfig{PullRequestTarget: true, IssueComment: true}
+	commentOnly := TriggerConfig{IssueComment: true}
+
+	authorGuard := "github.event.comment.author_association != 'NONE' && github.event.comment.author_association != 'FIRST_TIME_CONTRIBUTOR'"
+	forkExclusion := "steps.context.outputs.is_fork != 'true'"
+	sameRepoGuard := "github.event.pull_request.head.repo.full_name == github.repository"
+
+	cases := []struct {
+		name     string
+		wf       *Workflow
+		expected string
+	}{
+		// Baseline: PRT alone, no mitigations → critical.
+		{"PRT only, no guards", build(prt, "", ""), SeverityCritical},
+
+		// PRT only + fork-exclusion at install step → PRT drops from external set,
+		// no other external triggers, falls to internal-trigger tier → high.
+		{"PRT only, install step excludes forks (is_fork output)", build(prt, "", forkExclusion), SeverityHigh},
+		{"PRT only, install step excludes forks (same-repo guard)", build(prt, "", sameRepoGuard), SeverityHigh},
+
+		// PRT + IssueComment: fork-exclusion only drops PRT, IssueComment keeps
+		// external tier → critical.
+		{"PRT+comment, install excludes forks (only)", build(prtAndComment, "", forkExclusion), SeverityCritical},
+
+		// PRT + IssueComment + author_association guard at job level + fork-
+		// exclusion at install: both signals applied → critical → -1 = high.
+		{"PRT+comment, fork-excluded + author-association", build(prtAndComment, authorGuard, forkExclusion), SeverityHigh},
+
+		// IssueComment alone + author_association → critical → -1 = high.
+		{"IssueComment only, author-association guard", build(commentOnly, authorGuard, ""), SeverityHigh},
+
+		// IssueComment alone, no guard → critical baseline.
+		{"IssueComment only, no guards", build(commentOnly, "", ""), SeverityCritical},
+
+		// PRT only + fork-exclusion + author-association → external surface
+		// drained (no other external triggers), falls to internal tier → high →
+		// -1 (author) = medium. Closest synthetic match to the rhai-org-pulse
+		// claude-review.yml shape.
+		{"PRT only, fork-excluded + author-association", build(prt, authorGuard, forkExclusion), SeverityMedium},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			findings := CheckLifecycleInstallBeforeCredentialedOperation(tc.wf)
+			if len(findings) != 1 {
+				t.Fatalf("expected 1 finding, got %d: %v", len(findings), findings)
+			}
+			if findings[0].Severity != tc.expected {
+				t.Fatalf("expected %s, got %s — reason: %s", tc.expected, findings[0].Severity, findings[0].Message)
+			}
+		})
+	}
+}
+
 func TestCheckLifecycleInstallBeforeCredentialedOperation_RepoNPMRC(t *testing.T) {
 	dir := t.TempDir()
 	workflowDir := filepath.Join(dir, ".github", "workflows")

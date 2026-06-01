@@ -3301,7 +3301,7 @@ func CheckLifecycleInstallBeforeCredentialedOperation(wf *Workflow) []Finding {
 				continue
 			}
 
-			severity, reason := lifecycleCredentialSeverity(wf, job, op.step)
+			severity, reason := lifecycleCredentialSeverity(wf, job, install.step, op.step)
 
 			msg := fmt.Sprintf(
 				"Lifecycle Install Before Credentialed Operation: %s install runs before %s in job '%s'",
@@ -3478,18 +3478,30 @@ func firstOperationAfter(install lifecycleInstall, ops []credentialedOperation) 
 }
 
 // lifecycleCredentialSeverity tiers the FG-026 finding by trigger + defense-
-// in-depth signals. Environment gate and tag-ref guard each reduce severity by
-// one step; absent both, the trigger's base severity applies. Tag-ref guard
-// restricts the credentialed path to tag pushes (which require repo write
-// access), folding the FG-027 "weakly constrained trusted publishing" case
-// into FG-026 instead of producing a separate finding.
-func lifecycleCredentialSeverity(wf *Workflow, job Job, op Step) (string, string) {
+// in-depth signals. Environment gate, tag-ref guard, and author-association
+// guard each reduce severity by one step; absent all, the trigger's base
+// severity applies. When the install step's own if: excludes the fork-PR
+// branch (claude-code-action / Backstage-style workflows), pull_request_target
+// is removed from the external-trigger tier consideration. Tag-ref guard
+// restricts the credentialed path to tag pushes (folding the FG-027 weakly-
+// constrained trusted publishing case into FG-026); author-association guard
+// restricts triggers like issue_comment to known contributors only.
+func lifecycleCredentialSeverity(wf *Workflow, job Job, install Step, op Step) (string, string) {
 	hasEnvGate := job.Environment != ""
 	hasTag := hasTagGuard(job, op)
+	hasAuthor := hasAuthorAssociationGuard(job)
+	forkExcluded := installStepExcludesForks(install) && wf.On.PullRequestTarget
+
+	// Drop pull_request_target from the external set when the install step
+	// itself excludes forks. WorkflowRun and IssueComment are not affected.
+	externalTrigger := wf.On.WorkflowRun || wf.On.IssueComment
+	if !forkExcluded && wf.On.PullRequestTarget {
+		externalTrigger = true
+	}
 
 	var sev, triggerLabel string
 	switch {
-	case wf.On.WorkflowRun || wf.On.PullRequestTarget || wf.On.IssueComment:
+	case externalTrigger:
 		triggerLabel = "external trigger"
 		if hasEnvGate {
 			sev = SeverityHigh
@@ -3515,6 +3527,9 @@ func lifecycleCredentialSeverity(wf *Workflow, job Job, op Step) (string, string
 	if hasTag {
 		sev = downgradeBy(sev, 1)
 	}
+	if hasAuthor {
+		sev = downgradeBy(sev, 1)
+	}
 
 	gates := []string{}
 	if hasEnvGate {
@@ -3523,6 +3538,12 @@ func lifecycleCredentialSeverity(wf *Workflow, job Job, op Step) (string, string
 	if hasTag {
 		gates = append(gates, "tag-ref guard")
 	}
+	if hasAuthor {
+		gates = append(gates, "author-association guard")
+	}
+	if forkExcluded {
+		gates = append(gates, "step-level fork exclusion")
+	}
 	reason := triggerLabel
 	if len(gates) > 0 {
 		reason += " with " + strings.Join(gates, " + ")
@@ -3530,6 +3551,66 @@ func lifecycleCredentialSeverity(wf *Workflow, job Job, op Step) (string, string
 		reason += " without environment or tag guard"
 	}
 	return sev, reason
+}
+
+// installStepExcludesForks returns true when an install step's if: evaluates
+// to false on pull_request_target / fork-PR triggers. Recognizes the common
+// idioms: step output flags set by an upstream "determine context" step
+// (is_fork-style), direct same-repo guards comparing head.repo.full_name to
+// github.repository, and explicit event_name comparisons.
+func installStepExcludesForks(step Step) bool {
+	g := strings.ToLower(strings.ReplaceAll(step.If, " ", ""))
+	if g == "" {
+		return false
+	}
+	// Step-output fork flag set by an upstream "determine context" step.
+	if strings.Contains(g, "is_fork!='true'") ||
+		strings.Contains(g, `is_fork!="true"`) ||
+		strings.Contains(g, "is_fork=='false'") ||
+		strings.Contains(g, `is_fork=="false"`) ||
+		strings.Contains(g, "fork_pr!='true'") ||
+		strings.Contains(g, `fork_pr!="true"`) {
+		return true
+	}
+	// Direct same-repo guard.
+	if strings.Contains(g, "head.repo.full_name==github.repository") ||
+		strings.Contains(g, "github.repository==github.event.pull_request.head.repo.full_name") {
+		return true
+	}
+	// Direct trigger exclusion.
+	if strings.Contains(g, "github.event_name!='pull_request_target'") ||
+		strings.Contains(g, `github.event_name!="pull_request_target"`) {
+		return true
+	}
+	return false
+}
+
+// hasAuthorAssociationGuard returns true when the job's if: restricts execution
+// to known contributors. Matches both exclusion idioms (`!= 'NONE'`,
+// `!= 'FIRST_TIME_CONTRIBUTOR'`) and inclusion idioms (`== 'MEMBER'`,
+// `== 'COLLABORATOR'`, etc.). One-step downgrade — soft signal because the
+// guard often applies to a subset of triggers (e.g. issue_comment only), so we
+// don't claim full mitigation.
+func hasAuthorAssociationGuard(job Job) bool {
+	g := strings.ToLower(strings.ReplaceAll(job.If, " ", ""))
+	if !strings.Contains(g, "author_association") {
+		return false
+	}
+	if strings.Contains(g, "author_association!='none'") ||
+		strings.Contains(g, `author_association!="none"`) ||
+		strings.Contains(g, "author_association!='first_timer'") ||
+		strings.Contains(g, `author_association!="first_timer"`) ||
+		strings.Contains(g, "author_association!='first_time_contributor'") ||
+		strings.Contains(g, `author_association!="first_time_contributor"`) {
+		return true
+	}
+	for _, role := range []string{"member", "owner", "collaborator", "contributor"} {
+		if strings.Contains(g, "author_association=='"+role+"'") ||
+			strings.Contains(g, `author_association=="`+role+`"`) {
+			return true
+		}
+	}
+	return false
 }
 
 func hasTagGuard(job Job, op Step) bool {
