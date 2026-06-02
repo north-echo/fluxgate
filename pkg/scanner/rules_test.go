@@ -532,9 +532,12 @@ func TestCheckLifecycleInstallBeforeCredentialedOperation_SeverityTiers(t *testi
 		{"push with environment", makeWorkflow("npm", false, ""), SeverityMedium},
 		{"push with tag guard", makeWorkflow("", false, tagGuard), SeverityMedium},
 		{"push with environment and tag guard", makeWorkflow("npm", false, tagGuard), SeverityLow},
-		{"dispatch no environment", makeWorkflow("", true, ""), SeverityCritical},
-		{"dispatch with environment", makeWorkflow("npm", true, ""), SeverityMedium},
-		{"dispatch with tag guard", makeWorkflow("", true, tagGuard), SeverityHigh},
+		// workflow_dispatch alone (no companion push/PR) is repo-writer-gated:
+		// only actors with `actions: write` can trigger. Treated as repo-writer
+		// tier alongside tag-only push and release events.
+		{"dispatch no environment", makeWorkflow("", true, ""), SeverityMedium},
+		{"dispatch with environment", makeWorkflow("npm", true, ""), SeverityLow},
+		{"dispatch with tag guard", makeWorkflow("", true, tagGuard), SeverityLow},
 	}
 
 	for _, tc := range cases {
@@ -657,6 +660,7 @@ func TestCheckLifecycleInstallBeforeCredentialedOperation_RepoWriterTriggers(t *
 	releaseEvent := TriggerConfig{Release: true}
 	releaseEventWithDispatch := TriggerConfig{Release: true, WorkflowDispatch: true}
 	pushTagsAndBareDispatch := TriggerConfig{Push: true, PushTagsOnly: true, WorkflowDispatch: true}
+	dispatchPlusBranchPush := TriggerConfig{Push: true, WorkflowDispatch: true}
 	botAllowlist := "github.event.pull_request.user.login == 'rhdh-bot' && github.event.pull_request.merged == true"
 	actorAllowlist := "github.actor == 'backstage-service'"
 	pullRequestClosed := TriggerConfig{PullRequest: true}
@@ -677,6 +681,9 @@ func TestCheckLifecycleInstallBeforeCredentialedOperation_RepoWriterTriggers(t *
 		{"release + dispatch", build(releaseEventWithDispatch, ""), SeverityMedium},
 		// Tag-only push + workflow_dispatch: same — both are repo-writer-only.
 		{"tag-only push + dispatch", build(pushTagsAndBareDispatch, ""), SeverityMedium},
+		// Dispatch + branch push (not tag-only): the push surface dominates;
+		// dispatch's repo-writer gate doesn't help. Falls to internal-trigger tier.
+		{"dispatch + branch push", build(dispatchPlusBranchPush, ""), SeverityHigh},
 		// pull_request:closed with bot-login allowlist on job.If — rhdh-plugins
 		// release_workspace_version shape. PR trigger → internal-trigger tier
 		// (PR isn't in our external set), then author-allowlist downgrades → medium.

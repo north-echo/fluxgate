@@ -3501,12 +3501,20 @@ func lifecycleCredentialSeverity(wf *Workflow, job Job, install Step, op Step) (
 		externalTrigger = true
 	}
 
-	// Tag-only push (`on: push: tags:`) and `on: release:` are repo-writer-
-	// gated paths: only contributors with tag-create or release-create
-	// permission can trigger. When push is tag-only AND there is no other
-	// branch-push surface, treat as internal-trigger tier (not external).
-	// Release-event-only or release+workflow_call falls into the same bucket.
-	hasGatedTrigger := (wf.On.Push && wf.On.PushTagsOnly) || wf.On.Release
+	// Repo-writer-gated paths: only contributors with tag-create, release-
+	// create, or workflow_dispatch permission can trigger. All three require
+	// the same `actions: write` / repo-write permission level. When the only
+	// trigger paths are these, treat as repo-writer-trigger tier (not
+	// external). workflow_dispatch alone counts only when paired with no
+	// auto-firing trigger (push/PR/PRT/WR/IC) — otherwise a co-existing push
+	// is the dominant surface and the dispatch flag adds no safety.
+	dispatchOnly := wf.On.WorkflowDispatch &&
+		!wf.On.Push &&
+		!wf.On.PullRequest &&
+		!wf.On.PullRequestTarget &&
+		!wf.On.WorkflowRun &&
+		!wf.On.IssueComment
+	hasGatedTrigger := (wf.On.Push && wf.On.PushTagsOnly) || wf.On.Release || dispatchOnly
 
 	var sev, triggerLabel string
 	switch {
@@ -3517,16 +3525,10 @@ func lifecycleCredentialSeverity(wf *Workflow, job Job, install Step, op Step) (
 		} else {
 			sev = SeverityCritical
 		}
-	case wf.On.WorkflowDispatch && !hasGatedTrigger:
-		triggerLabel = "manual trigger"
-		if hasEnvGate {
-			sev = SeverityMedium
-		} else {
-			sev = SeverityCritical
-		}
 	case hasGatedTrigger:
-		// Tag-only push or release event = repo-writer-only path. Equivalent
-		// in effect to a permission-gate job (FG-001 PermissionGateJob pattern).
+		// Tag-only push, release event, or dispatch-only = repo-writer-only
+		// path. Equivalent in effect to a permission-gate job (FG-001
+		// PermissionGateJob pattern).
 		triggerLabel = "repo-writer trigger"
 		if hasEnvGate {
 			sev = SeverityLow
@@ -3567,6 +3569,9 @@ func lifecycleCredentialSeverity(wf *Workflow, job Job, install Step, op Step) (
 	}
 	if wf.On.Release {
 		gates = append(gates, "release event")
+	}
+	if dispatchOnly {
+		gates = append(gates, "dispatch-only")
 	}
 	reason := triggerLabel
 	if len(gates) > 0 {
