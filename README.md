@@ -143,6 +143,15 @@ fluxgate batch --top 1000 --db findings.db
 fluxgate batch --db findings.db --report report.md
 ```
 
+For large surveys, `--clone` swaps the GitHub Contents API for `git clone`
+with sparse checkout of `.github/` only. This avoids the 5,000 req/hr API
+rate limit and is typically faster past a few thousand repos. Tune
+parallelism with `--concurrency` (default 5):
+
+```bash
+fluxgate batch --top 10000 --clone --concurrency 10 --db findings.db
+```
+
 See [DISCLOSURE.md](DISCLOSURE.md) for our responsible disclosure protocol.
 
 ## License
