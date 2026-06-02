@@ -778,6 +778,62 @@ func TestCheckLifecycleInstallBeforeCredentialedOperation_CredentialClasses(t *t
 	}
 }
 
+func TestCheckLifecycleInstallBeforeCredentialedOperation_PublishStepGuard(t *testing.T) {
+	// Mirror of installStepExcludesForks but on the publish step. When the
+	// credentialed op's own if: restricts to push-to-main / internal triggers,
+	// the install can still run on PRs but no credential is reachable on those
+	// runs. yaml-language-server CI.yaml is the prototype case.
+	tests := []struct {
+		name    string
+		opIf    string
+		expects string
+	}{
+		{
+			name:    "publish gated to push event_name -> drops PR/external",
+			opIf:    "github.event_name == 'push'",
+			expects: SeverityHigh, // push trigger; PR drops out; falls to internal tier
+		},
+		{
+			name:    "publish gated to refs/heads/main -> drops other refs",
+			opIf:    "github.ref == 'refs/heads/main'",
+			expects: SeverityHigh,
+		},
+		{
+			name:    "no publish guard, PR + push triggers -> external tier",
+			opIf:    "",
+			expects: SeverityCritical, // PR is external; no env/tag guard
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			wf := &Workflow{
+				Path: "release.yaml",
+				On:   TriggerConfig{Push: true, PullRequest: true, PullRequestTarget: true},
+				Permissions: PermissionsConfig{
+					Set:    true,
+					Scopes: map[string]string{"contents": "read"},
+				},
+				Jobs: map[string]Job{
+					"build": {
+						Steps: []Step{
+							{Run: "npm ci", Line: 10},
+							{Run: "npm publish", If: tc.opIf, Line: 12, Env: map[string]string{"NODE_AUTH_TOKEN": "${{ secrets.NPM_TOKEN }}"}},
+						},
+					},
+				},
+			}
+			findings := CheckLifecycleInstallBeforeCredentialedOperation(wf)
+			if len(findings) != 1 {
+				t.Fatalf("expected 1 finding, got %d: %v", len(findings), findings)
+			}
+			if findings[0].Severity != tc.expects {
+				t.Fatalf("expected %s, got %s — reason: %s", tc.expects, findings[0].Severity, findings[0].Message)
+			}
+		})
+	}
+}
+
 func TestCheckLifecycleInstallBeforeCredentialedOperation_RepoNPMRC(t *testing.T) {
 	dir := t.TempDir()
 	workflowDir := filepath.Join(dir, ".github", "workflows")

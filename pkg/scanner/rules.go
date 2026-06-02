@@ -3550,12 +3550,24 @@ func lifecycleCredentialSeverity(wf *Workflow, job Job, install Step, op Step) (
 	hasTag := hasTagGuard(job, op)
 	hasAuthor := hasAuthorAssociationGuard(job) || hasUserLoginAllowlist(job)
 	forkExcluded := installStepExcludesForks(install) && wf.On.PullRequestTarget
+	// Step-level publish guard: when the credentialed op's own if: restricts
+	// the trigger surface (e.g. yaml-language-server CI.yaml publishes only on
+	// push to main while the install runs on PRs too), the credential isn't
+	// reachable on the broader trigger set even though the install is.
+	publishGuarded := opStepRestrictsToInternal(op)
 
 	// Drop pull_request_target from the external set when the install step
 	// itself excludes forks. WorkflowRun and IssueComment are not affected.
 	externalTrigger := wf.On.WorkflowRun || wf.On.IssueComment
 	if !forkExcluded && wf.On.PullRequestTarget {
 		externalTrigger = true
+	}
+	// Step-level publish guard wins over the trigger surface: if the credentialed
+	// op's `if:` restricts execution to push-to-main / non-external triggers, the
+	// install can still run on PRs but no credential is reachable. Drop all
+	// external triggers from consideration.
+	if publishGuarded {
+		externalTrigger = false
 	}
 
 	// Repo-writer-gated paths: only contributors with tag-create, release-
@@ -3620,6 +3632,9 @@ func lifecycleCredentialSeverity(wf *Workflow, job Job, install Step, op Step) (
 	}
 	if forkExcluded {
 		gates = append(gates, "step-level fork exclusion")
+	}
+	if publishGuarded {
+		gates = append(gates, "step-level publish guard")
 	}
 	if wf.On.Push && wf.On.PushTagsOnly {
 		gates = append(gates, "tag-only push")
@@ -3733,6 +3748,51 @@ func containsNonGithubSecretRef(s string) bool {
 		if name == "github_token" {
 			continue
 		}
+		return true
+	}
+	return false
+}
+
+// opStepRestrictsToInternal returns true when a credentialed op step's if:
+// restricts execution to push-to-main / internal triggers — i.e. the publish
+// won't run on PRs or external triggers even though the install does. Mirror
+// of installStepExcludesForks but applied to the publish op, so we recognize
+// patterns like yaml-language-server CI.yaml where:
+//
+//	on: [push, pull_request]
+//	...
+//	  - name: Install   # runs on both
+//	    run: npm ci
+//	  - name: Publish   # runs only on push to main
+//	    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+//	    run: npm publish
+//
+// When the publish step's if: gates to internal-only, no credential is
+// reachable on PR-triggered runs, so external triggers should drop out.
+func opStepRestrictsToInternal(step Step) bool {
+	g := strings.ToLower(strings.ReplaceAll(step.If, " ", ""))
+	if g == "" {
+		return false
+	}
+	// Restrict to push event (excludes PR/PRT/IC/WR).
+	if strings.Contains(g, "github.event_name=='push'") ||
+		strings.Contains(g, `github.event_name=="push"`) {
+		return true
+	}
+	// Restrict to a default-branch ref (only push to main/master fires).
+	if strings.Contains(g, "github.ref=='refs/heads/main'") ||
+		strings.Contains(g, `github.ref=="refs/heads/main"`) ||
+		strings.Contains(g, "github.ref=='refs/heads/master'") ||
+		strings.Contains(g, `github.ref=="refs/heads/master"`) ||
+		strings.Contains(g, "ref=='refs/heads/main'") ||
+		strings.Contains(g, `ref=="refs/heads/main"`) {
+		return true
+	}
+	// Negation of external event names.
+	if strings.Contains(g, "github.event_name!='pull_request'") ||
+		strings.Contains(g, `github.event_name!="pull_request"`) ||
+		strings.Contains(g, "github.event_name!='pull_request_target'") ||
+		strings.Contains(g, `github.event_name!="pull_request_target"`) {
 		return true
 	}
 	return false
