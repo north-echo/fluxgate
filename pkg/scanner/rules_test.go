@@ -713,6 +713,71 @@ func TestCheckLifecycleInstallBeforeCredentialedOperation_RepoWriterTriggers(t *
 	}
 }
 
+func TestCheckLifecycleInstallBeforeCredentialedOperation_CredentialClasses(t *testing.T) {
+	// When the credentialed op after the install is github-token only (gh
+	// release / softprops-action-gh-release / etc.), severity should drop to
+	// info regardless of trigger surface. Matches the consoledot-e2e and
+	// openshift/cac-content-fork pattern from the 2026-06-01 triage.
+	tests := []struct {
+		name    string
+		opRun   string
+		opUses  string
+		opEnv   map[string]string // env on the publish step; non-GITHUB_TOKEN values prevent downgrade
+		expects string
+	}{
+		{
+			name:    "gh release create only -> github-token -> info",
+			opRun:   "gh release create v1.0.0 dist/*",
+			expects: SeverityInfo,
+		},
+		{
+			name:    "softprops/action-gh-release only -> github-token -> info",
+			opUses:  "softprops/action-gh-release@v1",
+			expects: SeverityInfo,
+		},
+		{
+			name:    "gh release with NPM_TOKEN env on publish step -> planted-hook risk -> no downgrade",
+			opRun:   "gh release create v1.0.0 dist/*",
+			opEnv:   map[string]string{"NODE_AUTH_TOKEN": "${{ secrets.NPM_TOKEN }}"},
+			expects: SeverityHigh,
+		},
+		{
+			name:    "npm publish (registry) -> normal tier, no downgrade",
+			opRun:   "npm publish",
+			opEnv:   map[string]string{"NODE_AUTH_TOKEN": "${{ secrets.NPM_TOKEN }}"},
+			expects: SeverityHigh,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			wf := &Workflow{
+				Path: "release.yaml",
+				On:   TriggerConfig{Push: true},
+				Permissions: PermissionsConfig{
+					Set:    true,
+					Scopes: map[string]string{"contents": "write"}, // satisfies gh-release credential gate
+				},
+				Jobs: map[string]Job{
+					"release": {
+						Steps: []Step{
+							{Run: "npm ci", Line: 10},
+							{Run: tc.opRun, Uses: tc.opUses, Line: 12, Env: tc.opEnv},
+						},
+					},
+				},
+			}
+			findings := CheckLifecycleInstallBeforeCredentialedOperation(wf)
+			if len(findings) != 1 {
+				t.Fatalf("expected 1 finding, got %d: %v", len(findings), findings)
+			}
+			if findings[0].Severity != tc.expects {
+				t.Fatalf("expected %s, got %s — reason: %s", tc.expects, findings[0].Severity, findings[0].Message)
+			}
+		})
+	}
+}
+
 func TestCheckLifecycleInstallBeforeCredentialedOperation_RepoNPMRC(t *testing.T) {
 	dir := t.TempDir()
 	workflowDir := filepath.Join(dir, ".github", "workflows")

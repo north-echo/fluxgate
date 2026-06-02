@@ -3264,6 +3264,29 @@ type credentialedOperation struct {
 	kind      string
 	ecosystem string
 	command   string
+	class     string // "registry", "cloud", "github-token" — see feedback-credential-classes memory
+}
+
+// Credential-class priority for picking the highest-risk op after an install.
+// registry > cloud > github-token (rationale: registry tokens are long-lived
+// and supply-chain-pivotable; cloud OIDC is ephemeral but cross-system;
+// github-token is repo-scoped and revoked at job end).
+const (
+	credClassRegistry    = "registry"
+	credClassCloud       = "cloud"
+	credClassGithubToken = "github-token"
+)
+
+func credClassPriority(c string) int {
+	switch c {
+	case credClassRegistry:
+		return 3
+	case credClassCloud:
+		return 2
+	case credClassGithubToken:
+		return 1
+	}
+	return 0
 }
 
 var npmInstallPattern = regexp.MustCompile(`(?i)(^|[\s;&|()])npm\s+(install|i|ci)\b`)
@@ -3302,6 +3325,26 @@ func CheckLifecycleInstallBeforeCredentialedOperation(wf *Workflow) []Finding {
 			}
 
 			severity, reason := lifecycleCredentialSeverity(wf, job, install.step, op.step)
+
+			// Credential-class downgrade: when the highest-class op after the
+			// install is github-token (gh release / softprops-action-gh-release
+			// / actions/upload-release-asset / ncipollo with default token),
+			// the credential at risk is the ephemeral repo-scoped GITHUB_TOKEN
+			// — revoked at job end, can't pivot to an external registry. Drop
+			// to info regardless of trigger surface. See feedback-credential-
+			// classes memory for the full taxonomy.
+			//
+			// Guard: only downgrade when there's no *other* registry/cloud
+			// credential reachable on the same chain. Workflows that combine
+			// `gh release` with `ansible-galaxy publish` or container-registry
+			// push (like redhat-cop/infra.leapp and rhdh-plugin-export-utils)
+			// would otherwise be falsely silenced — the github-token op is the
+			// highest-class one we *detect*, but the un-detected GALAXY_*/
+			// container-registry secrets are the real exposure.
+			if op.class == credClassGithubToken && !hasNonGithubTokenSecret(wf, job, install.index) {
+				severity = SeverityInfo
+				reason += " + github-token-only credential (no external registry exposure)"
+			}
 
 			msg := fmt.Sprintf(
 				"Lifecycle Install Before Credentialed Operation: %s install runs before %s in job '%s'",
@@ -3428,14 +3471,14 @@ func credentialedOperations(wf *Workflow, job Job) []credentialedOperation {
 		if step.Run != "" {
 			switch {
 			case npmPublishPattern.MatchString(step.Run):
-				ops = append(ops, credentialedOperation{step: step, index: i, kind: "npm publish", ecosystem: "npm", command: matchedCommand(step.Run, npmPublishPattern)})
+				ops = append(ops, credentialedOperation{step: step, index: i, kind: "npm publish", ecosystem: "npm", command: matchedCommand(step.Run, npmPublishPattern), class: credClassRegistry})
 			case pypiPublishPattern.MatchString(step.Run):
-				ops = append(ops, credentialedOperation{step: step, index: i, kind: "PyPI publish", ecosystem: "pip", command: matchedCommand(step.Run, pypiPublishPattern)})
+				ops = append(ops, credentialedOperation{step: step, index: i, kind: "PyPI publish", ecosystem: "pip", command: matchedCommand(step.Run, pypiPublishPattern), class: credClassRegistry})
 			case gemPublishPattern.MatchString(step.Run):
-				ops = append(ops, credentialedOperation{step: step, index: i, kind: "RubyGems publish", ecosystem: "gem", command: matchedCommand(step.Run, gemPublishPattern)})
+				ops = append(ops, credentialedOperation{step: step, index: i, kind: "RubyGems publish", ecosystem: "gem", command: matchedCommand(step.Run, gemPublishPattern), class: credClassRegistry})
 			case ghReleasePattern.MatchString(step.Run):
 				if effectivePermission(wf, job, "contents") == "write" || hasCredentialEnv(wf, job, step) || HasElevatedPermissions(wf.Permissions, job.Permissions) {
-					ops = append(ops, credentialedOperation{step: step, index: i, kind: "GitHub release", command: matchedCommand(step.Run, ghReleasePattern)})
+					ops = append(ops, credentialedOperation{step: step, index: i, kind: "GitHub release", command: matchedCommand(step.Run, ghReleasePattern), class: credClassGithubToken})
 				}
 			}
 		}
@@ -3448,33 +3491,47 @@ func credentialedOperations(wf *Workflow, job Job) []credentialedOperation {
 				"azure/login",
 				"hashicorp/vault-action":
 				if effectivePermission(wf, job, "id-token") == "write" || hasCredentialEnv(wf, job, step) {
-					ops = append(ops, credentialedOperation{step: step, index: i, kind: "cloud auth", command: action})
+					ops = append(ops, credentialedOperation{step: step, index: i, kind: "cloud auth", command: action, class: credClassCloud})
 				}
 			case "softprops/action-gh-release",
 				"actions/upload-release-asset",
 				"ncipollo/release-action":
 				if effectivePermission(wf, job, "contents") == "write" || hasCredentialEnv(wf, job, step) || HasElevatedPermissions(wf.Permissions, job.Permissions) {
-					ops = append(ops, credentialedOperation{step: step, index: i, kind: "GitHub release", command: action})
+					ops = append(ops, credentialedOperation{step: step, index: i, kind: "GitHub release", command: action, class: credClassGithubToken})
 				}
 			case "js-devtools/npm-publish":
-				ops = append(ops, credentialedOperation{step: step, index: i, kind: "npm publish", ecosystem: "npm", command: action})
+				ops = append(ops, credentialedOperation{step: step, index: i, kind: "npm publish", ecosystem: "npm", command: action, class: credClassRegistry})
 			case "pypa/gh-action-pypi-publish":
-				ops = append(ops, credentialedOperation{step: step, index: i, kind: "PyPI publish", ecosystem: "pip", command: action})
+				ops = append(ops, credentialedOperation{step: step, index: i, kind: "PyPI publish", ecosystem: "pip", command: action, class: credClassRegistry})
 			case "rubygems/release-gem":
-				ops = append(ops, credentialedOperation{step: step, index: i, kind: "RubyGems publish", ecosystem: "gem", command: action})
+				ops = append(ops, credentialedOperation{step: step, index: i, kind: "RubyGems publish", ecosystem: "gem", command: action, class: credClassRegistry})
 			}
 		}
 	}
 	return ops
 }
 
+// firstOperationAfter returns the highest-class credentialed operation ordered
+// after the install. Class priority: registry > cloud > github-token. Picking
+// the highest-class op (rather than the chronologically first one) lets us
+// surface the worst-case exposure when multiple credentialed steps follow an
+// install — e.g. `softprops/action-gh-release` (github-token) immediately
+// after install followed by `npm publish` (registry) two steps later. The
+// registry op is what matters for blast radius even though the github-token
+// op came first.
 func firstOperationAfter(install lifecycleInstall, ops []credentialedOperation) (credentialedOperation, bool) {
+	var best credentialedOperation
+	found := false
 	for _, op := range ops {
-		if op.index > install.index {
-			return op, true
+		if op.index <= install.index {
+			continue
+		}
+		if !found || credClassPriority(op.class) > credClassPriority(best.class) {
+			best = op
+			found = true
 		}
 	}
-	return credentialedOperation{}, false
+	return best, found
 }
 
 // lifecycleCredentialSeverity tiers the FG-026 finding by trigger + defense-
@@ -3605,6 +3662,78 @@ func hasUserLoginAllowlist(job Job) bool {
 		if strings.Contains(g, p) {
 			return true
 		}
+	}
+	return false
+}
+
+// hasNonGithubTokenSecret returns true when any step at or after installIdx
+// references a secret other than the ambient GITHUB_TOKEN, or has an env var
+// with a credential-shaped name not bound to secrets.GITHUB_TOKEN. Catches
+// registry/cloud tokens that aren't tied to a credentialed op the rule
+// explicitly detects (ansible-galaxy publish, container-registry push,
+// arbitrary `secrets.X` inline in run/with blocks).
+func hasNonGithubTokenSecret(wf *Workflow, job Job, installIdx int) bool {
+	// Workflow- and job-level env are reachable from all steps.
+	for k, v := range mergeEnv(wf.Env, job.Env) {
+		if envIsNonGithubCredential(k, v) {
+			return true
+		}
+	}
+	// Steps ordered after the install.
+	for i, step := range job.Steps {
+		if i <= installIdx {
+			continue
+		}
+		for k, v := range step.Env {
+			if envIsNonGithubCredential(k, v) {
+				return true
+			}
+		}
+		for _, v := range step.With {
+			if containsNonGithubSecretRef(v) {
+				return true
+			}
+		}
+		if containsNonGithubSecretRef(step.Run) {
+			return true
+		}
+	}
+	return false
+}
+
+func envIsNonGithubCredential(k, v string) bool {
+	keyU := strings.ToUpper(k)
+	// GH_TOKEN/GITHUB_TOKEN set to secrets.GITHUB_TOKEN is the ambient path; skip.
+	if keyU == "GITHUB_TOKEN" || keyU == "GH_TOKEN" {
+		if strings.Contains(strings.ToLower(v), "secrets.github_token") {
+			return false
+		}
+	}
+	if containsNonGithubSecretRef(v) {
+		return true
+	}
+	// Suspicious key names imply external credential even if value isn't a
+	// secrets.* reference (could be a raw env injection in CI config).
+	if (strings.Contains(keyU, "TOKEN") || strings.Contains(keyU, "PASSWORD") ||
+		strings.Contains(keyU, "API_KEY") || strings.HasSuffix(keyU, "_KEY") ||
+		strings.Contains(keyU, "SECRET")) && keyU != "GITHUB_TOKEN" && keyU != "GH_TOKEN" {
+		return true
+	}
+	return false
+}
+
+var nonGithubSecretRefPattern = regexp.MustCompile(`(?i)secrets\.([a-z0-9_-]+)`)
+
+func containsNonGithubSecretRef(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, m := range nonGithubSecretRefPattern.FindAllStringSubmatch(s, -1) {
+		name := strings.ToLower(m[1])
+		if name == "github_token" {
+			continue
+		}
+		return true
 	}
 	return false
 }
