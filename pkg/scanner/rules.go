@@ -2804,6 +2804,14 @@ var knownVulnerableActions = map[string][]advisoryEntry{
 	},
 }
 
+var floatingMajorPattern = regexp.MustCompile(`^v?\d+$`)
+
+// isFloatingMajor reports whether a ref is a bare major-version tag like
+// "v4" or "3" — tags that float to the latest release in that major series.
+func isFloatingMajor(ref string) bool {
+	return floatingMajorPattern.MatchString(ref)
+}
+
 // parseVersion extracts major, minor, patch from a version string like "v1.2.3", "v1.2", "v1", "1.2.3".
 func parseVersion(v string) (major, minor, patch int, ok bool) {
 	v = strings.TrimPrefix(v, "v")
@@ -2908,6 +2916,17 @@ func CheckKnownVulnerableActions(wf *Workflow) []Finding {
 				// Version-bounded advisory: SHA pins can't be version-compared.
 				if isSHA {
 					continue
+				}
+				// Floating major-version tag (e.g. @v4) resolves to the latest
+				// release in that major series. If the fix landed in the same
+				// or older major, the floating tag picks it up automatically —
+				// flagging would be a false positive.
+				if isFloatingMajor(ref) {
+					refMaj, _, _, _ := parseVersion(ref)
+					fixMaj, _, _, _ := parseVersion(adv.FixedVersion)
+					if refMaj >= fixMaj {
+						continue
+					}
 				}
 				if versionLessThan(ref, adv.FixedVersion) {
 					findings = append(findings, Finding{

@@ -243,6 +243,56 @@ func TestCheckKnownVulnerableActions(t *testing.T) {
 	}
 }
 
+func TestFG022FloatingMajorTagSuppressed(t *testing.T) {
+	// Bare major-version tags (e.g. @v4) float to the latest release in that
+	// major series. If the fix landed in that same major, the floating tag
+	// already includes it — flagging would be a false positive.
+	yaml := `name: t
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4        # FP: floating, fix in 4.2.0, same major
+      - uses: actions/checkout@v5        # FP: floating, ref major > fix major
+      - uses: actions/checkout@v3        # TP: ref major < fix major
+      - uses: actions/checkout@v4.1.7    # TP: explicit pin below fix
+      - uses: actions/checkout@v4.2.0    # NOT flagged (at fix)
+      - uses: tj-actions/changed-files@v44   # TP: floating, ref major < fix major (45)
+      - uses: tj-actions/changed-files@v45   # FP: floating, same major as fix
+`
+	wf, err := ParseWorkflow([]byte(yaml), "t.yml")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	findings := CheckKnownVulnerableActions(wf)
+	got := map[string]bool{}
+	for _, f := range findings {
+		got[f.Message] = true
+	}
+	mustFlag := []string{"actions/checkout@v3 has", "actions/checkout@v4.1.7 has", "tj-actions/changed-files@v44 has"}
+	mustNotFlag := []string{"actions/checkout@v4 has", "actions/checkout@v5 has", "tj-actions/changed-files@v45 has"}
+	for _, want := range mustFlag {
+		hit := false
+		for msg := range got {
+			if strings.Contains(msg, want) {
+				hit = true
+				break
+			}
+		}
+		if !hit {
+			t.Errorf("expected finding for %s, got: %v", want, findings)
+		}
+	}
+	for _, dont := range mustNotFlag {
+		for msg := range got {
+			if strings.Contains(msg, dont) {
+				t.Errorf("did not expect finding for %s (floating tag, fix in same/older major): %s", dont, msg)
+			}
+		}
+	}
+}
+
 func TestVersionLessThan(t *testing.T) {
 	tests := []struct {
 		a, b string
