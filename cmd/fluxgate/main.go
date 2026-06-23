@@ -253,12 +253,20 @@ func newBatchCmd() *cobra.Command {
 			}
 
 			// Build client with token rotation support
+			if tokens == "" {
+				tokens = os.Getenv("GITHUB_TOKENS")
+			}
 			var client *ghclient.Client
 			if tokens != "" {
 				tokenList := strings.Split(tokens, ",")
-				for i := range tokenList {
-					tokenList[i] = strings.TrimSpace(tokenList[i])
+				out := tokenList[:0]
+				for _, t := range tokenList {
+					t = strings.TrimSpace(t)
+					if t != "" {
+						out = append(out, t)
+					}
 				}
+				tokenList = out
 				client = ghclient.NewClientWithTokens(tokenList)
 				fmt.Printf("Using %d PATs with rotation\n", len(tokenList))
 			} else {
@@ -351,7 +359,7 @@ func newBatchCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&resume, "resume", false, "Skip repos already in the database")
 	cmd.Flags().StringVar(&reportPath, "report", "", "Generate markdown report to this path")
 	cmd.Flags().StringVarP(&token, "token", "t", "", "GitHub token (default: $GITHUB_TOKEN)")
-	cmd.Flags().StringVar(&tokens, "tokens", "", "Comma-separated GitHub tokens for PAT rotation")
+	cmd.Flags().StringVar(&tokens, "tokens", "", "Comma-separated GitHub tokens for PAT rotation (default: $GITHUB_TOKENS)")
 	cmd.Flags().StringVar(&severities, "severity", "", "Filter by severity (comma-separated)")
 	cmd.Flags().StringVar(&rules, "rules", "", "Filter by rule ID (comma-separated)")
 	cmd.Flags().DurationVar(&delay, "delay", 0, "Delay between repos to avoid rate limits (e.g. 1s, 500ms)")
