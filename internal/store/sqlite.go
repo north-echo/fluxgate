@@ -173,7 +173,7 @@ func (d *DB) SaveResultWithSource(owner, name string, stars int, language string
 	}
 	defer tx.Rollback()
 
-	res, err := tx.Exec(
+	if _, err := tx.Exec(
 		`INSERT INTO repos (owner, name, stars, language, workflows_count, findings_count, source)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(owner, name) DO UPDATE SET
@@ -184,25 +184,23 @@ func (d *DB) SaveResultWithSource(owner, name string, stars int, language string
 		   findings_count = excluded.findings_count,
 		   source = COALESCE(NULLIF(excluded.source, ''), repos.source)`,
 		owner, name, stars, language, result.Workflows, len(result.Findings), source,
-	)
-	if err != nil {
+	); err != nil {
 		return fmt.Errorf("inserting repo: %w", err)
 	}
 
-	repoID, err := res.LastInsertId()
-	if err != nil {
+	// modernc.org/sqlite returns a non-zero rowid from LastInsertId() even when
+	// the UPSERT took the DO UPDATE path, so the previous "fall back to SELECT
+	// only when LastInsertId == 0" branch never fired on rescan. The result was
+	// findings pointing at synthetic rowids that never existed in repos — see
+	// fluxgate issue #16. Always SELECT to get the canonical id.
+	var repoID int64
+	if err := tx.Get(&repoID, "SELECT id FROM repos WHERE owner = ? AND name = ?", owner, name); err != nil {
 		return err
 	}
-	// If it was an update (conflict), get the existing ID
-	if repoID == 0 {
-		err = tx.Get(&repoID, "SELECT id FROM repos WHERE owner = ? AND name = ?", owner, name)
-		if err != nil {
-			return err
-		}
-		// Clear old findings on rescan
-		if _, err := tx.Exec("DELETE FROM findings WHERE repo_id = ?", repoID); err != nil {
-			return err
-		}
+	// Drop any prior findings for this repo so a rescan replaces them rather
+	// than accumulating duplicates.
+	if _, err := tx.Exec("DELETE FROM findings WHERE repo_id = ?", repoID); err != nil {
+		return err
 	}
 
 	for _, f := range result.Findings {
