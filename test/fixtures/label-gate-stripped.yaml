@@ -1,0 +1,23 @@
+name: Label Gate With Sync Strip
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, labeled]
+jobs:
+  strip-on-sync:
+    if: github.event.action == 'synchronize'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Remove ok-to-test on push
+        run: gh pr edit "$PR" --remove-label "ok-to-test"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+  build-on-label:
+    if: contains(github.event.pull_request.labels.*.name, 'ok-to-test')
+    needs: strip-on-sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - run: make build

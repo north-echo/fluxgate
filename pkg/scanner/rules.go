@@ -4046,3 +4046,150 @@ func lifecycleInstallMitigations(ecosystem string) []string {
 		return common
 	}
 }
+
+// CheckLabelGateTOCTOU detects pull_request_target workflows that gate fork
+// code execution on a PR label but don't strip the label on synchronize.
+// After a maintainer applies the label, every subsequent commit on the PR
+// re-triggers the workflow with the label still attached — the gate authorizes
+// the initial SHA but trusts every later SHA implicitly (FG-027).
+//
+// Pattern observed in multiple workflows during corpus scanning.
+func CheckLabelGateTOCTOU(wf *Workflow) []Finding {
+	if !wf.On.PullRequestTarget {
+		return nil
+	}
+	if !prtTypesIncludeSynchronize(wf.On.PullRequestTargetTypes) {
+		return nil
+	}
+	if workflowStripsLabelOnSync(wf) {
+		return nil
+	}
+	if !workflowHasForkCheckout(wf) {
+		return nil
+	}
+
+	var findings []Finding
+	for jobName, job := range wf.Jobs {
+		labelName, gateLine, ok := jobLabelGate(job)
+		if !ok {
+			continue
+		}
+		findings = append(findings, Finding{
+			RuleID:   "FG-027",
+			Severity: SeverityHigh,
+			File:     wf.Path,
+			Line:     gateLine,
+			Message: fmt.Sprintf(
+				"TOCTOU label gate: job '%s' is gated on label '%s' but workflow does not strip "+
+					"the label on synchronize — attacker can re-push malicious code after approval",
+				jobName, labelName),
+			Details: "The 'synchronize' event re-runs the workflow when a PR's head is updated. " +
+				"If the gate label persists across pushes, a maintainer who applies the label to " +
+				"approve one commit implicitly approves every future commit on the same PR. " +
+				"Mitigations: (1) strip the label on synchronize and require re-labeling, " +
+				"(2) pin the gated SHA at label-application time and reject other SHAs, " +
+				"(3) use trusted-ref isolation (checkout base ref to root, PR head to subdir).",
+		})
+	}
+	return findings
+}
+
+// prtTypesIncludeSynchronize reports whether the pull_request_target trigger's
+// types list includes 'synchronize' (the default set when types is unspecified
+// also includes synchronize, so an empty list returns true).
+func prtTypesIncludeSynchronize(types []string) bool {
+	if len(types) == 0 {
+		return true
+	}
+	for _, t := range types {
+		if strings.EqualFold(t, "synchronize") {
+			return true
+		}
+	}
+	return false
+}
+
+// workflowStripsLabelOnSync detects steps that remove the gating label, which
+// neutralizes the TOCTOU window. Matches `gh pr edit --remove-label`,
+// actions-ecosystem/action-remove-labels, and similar.
+func workflowStripsLabelOnSync(wf *Workflow) bool {
+	for _, job := range wf.Jobs {
+		for _, step := range job.Steps {
+			if strings.HasPrefix(step.Uses, "actions-ecosystem/action-remove-labels") {
+				return true
+			}
+			if step.Run != "" && strings.Contains(step.Run, "gh pr edit") &&
+				strings.Contains(step.Run, "--remove-label") {
+				return true
+			}
+			if step.Run != "" && strings.Contains(step.Run, "/issues/") &&
+				strings.Contains(step.Run, "DELETE") &&
+				strings.Contains(step.Run, "/labels/") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// workflowHasForkCheckout reports whether any job in the workflow checks out
+// fork code (PR head ref).
+func workflowHasForkCheckout(wf *Workflow) bool {
+	for _, job := range wf.Jobs {
+		for _, step := range job.Steps {
+			if isCheckoutAction(step.Uses) && refPointsToPRHead(step.With["ref"]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// jobLabelGate returns the label name, the gating step's line, and true if the
+// job is gated on a PR label — either via an `if:` condition referencing
+// pull_request labels, or via the mheap/github-action-required-labels action.
+func jobLabelGate(job Job) (string, int, bool) {
+	if name := extractLabelFromCondition(job.If); name != "" {
+		line := 0
+		if len(job.Steps) > 0 {
+			line = job.Steps[0].Line
+		}
+		return name, line, true
+	}
+	for _, step := range job.Steps {
+		if strings.HasPrefix(step.Uses, "mheap/github-action-required-labels") {
+			label := step.With["labels"]
+			if label == "" {
+				label = step.With["label"]
+			}
+			if label == "" {
+				label = "<required>"
+			}
+			return label, step.Line, true
+		}
+		if name := extractLabelFromCondition(step.If); name != "" {
+			return name, step.Line, true
+		}
+	}
+	return "", 0, false
+}
+
+var labelContainsPattern = regexp.MustCompile(
+	`(?i)contains\s*\(\s*github\.event\.pull_request\.labels\.\*\.name\s*,\s*['"]([^'"]+)['"]`)
+var labelEqualsPattern = regexp.MustCompile(
+	`(?i)github\.event\.label\.name\s*==\s*['"]([^'"]+)['"]`)
+
+// extractLabelFromCondition returns the label name referenced in a GitHub
+// Actions condition expression, or "" if the condition isn't a label gate.
+func extractLabelFromCondition(cond string) string {
+	if cond == "" {
+		return ""
+	}
+	if m := labelContainsPattern.FindStringSubmatch(cond); m != nil {
+		return m[1]
+	}
+	if m := labelEqualsPattern.FindStringSubmatch(cond); m != nil {
+		return m[1]
+	}
+	return ""
+}

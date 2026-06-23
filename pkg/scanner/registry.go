@@ -32,6 +32,7 @@ func AllRules() map[string]Rule {
 		"FG-024": CheckGitHubEnvInjection,
 		"FG-025": CheckKnownIOCs,
 		"FG-026": CheckLifecycleInstallBeforeCredentialedOperation,
+		"FG-027": CheckLabelGateTOCTOU,
 	}
 }
 
@@ -63,4 +64,5 @@ var RuleDescriptions = map[string]string{
 	"FG-024": "GitHub Env Injection",
 	"FG-025": "Known Threat-Actor IOC",
 	"FG-026": "Lifecycle Install Before Credentialed Operation",
+	"FG-027": "TOCTOU Label Gate",
 }

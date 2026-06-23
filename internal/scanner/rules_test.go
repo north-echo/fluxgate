@@ -1063,6 +1063,47 @@ func TestCheckLocalActionUntrustedCheckout_TrustedRefIsolated(t *testing.T) {
 	}
 }
 
+// --- FG-027 TOCTOU Label Gate tests ---
+
+// Vulnerable pattern: pull_request_target with synchronize, job gated on an
+// `ok-to-test` label, no step strips the label on synchronize.
+func TestCheckLabelGateTOCTOU(t *testing.T) {
+	wf := loadFixture(t, "label-gate-toctou.yaml")
+	findings := CheckLabelGateTOCTOU(wf)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d: %v", len(findings), findings)
+	}
+	f := findings[0]
+	if f.RuleID != "FG-027" {
+		t.Errorf("expected FG-027, got %s", f.RuleID)
+	}
+	if f.Severity != SeverityHigh {
+		t.Errorf("expected high severity, got %s", f.Severity)
+	}
+	if !strings.Contains(f.Message, "ok-to-test") {
+		t.Errorf("expected label name in message, got: %s", f.Message)
+	}
+}
+
+// Safe pattern: workflow includes a step that strips the gating label on
+// synchronize, so re-pushed commits lose authorization until a maintainer
+// re-applies the label.
+func TestCheckLabelGateTOCTOU_LabelStripped(t *testing.T) {
+	wf := loadFixture(t, "label-gate-stripped.yaml")
+	findings := CheckLabelGateTOCTOU(wf)
+	if len(findings) != 0 {
+		t.Fatalf("expected 0 findings when label is stripped on sync, got %d: %v", len(findings), findings)
+	}
+}
+
+func TestCheckLabelGateTOCTOU_Safe(t *testing.T) {
+	wf := loadFixture(t, "safe-workflow.yaml")
+	findings := CheckLabelGateTOCTOU(wf)
+	if len(findings) != 0 {
+		t.Fatalf("expected 0 findings for safe workflow, got %d", len(findings))
+	}
+}
+
 // --- FG-017 GitHub Script Injection tests ---
 
 func TestCheckGitHubScriptInjection(t *testing.T) {

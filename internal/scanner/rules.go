@@ -35,6 +35,7 @@ var CheckArtifactCredentialLeak = pkgscanner.CheckArtifactCredentialLeak
 var CheckGitHubEnvInjection = pkgscanner.CheckGitHubEnvInjection
 var CheckKnownIOCs = pkgscanner.CheckKnownIOCs
 var CheckLifecycleInstallBeforeCredentialedOperation = pkgscanner.CheckLifecycleInstallBeforeCredentialedOperation
+var CheckLabelGateTOCTOU = pkgscanner.CheckLabelGateTOCTOU
 
 // Re-export types used in tests
 type MitigationAnalysis = pkgscanner.MitigationAnalysis
