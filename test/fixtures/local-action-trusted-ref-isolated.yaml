@@ -1,0 +1,26 @@
+name: Trusted Ref Isolation Test
+on:
+  pull_request_target:
+    types: [opened, synchronize]
+env:
+  TRUSTED_REF: ${{ format('refs/heads/{0}', (github.event_name == 'pull_request' && github.base_ref || 'main')) }}
+jobs:
+  validate-submission:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout trusted ref to root
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.TRUSTED_REF }}
+      - name: Checkout PR head to subdir
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          path: pr-branch
+      - name: Set up Python (local action — loaded from TRUSTED_REF checkout)
+        uses: ./.github/actions/setup-python
+      - name: Install CI scripts (local action — loaded from TRUSTED_REF checkout)
+        uses: ./.github/actions/install-ci-scripts

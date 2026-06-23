@@ -1051,6 +1051,18 @@ func TestCheckLocalActionUntrustedCheckout_Safe(t *testing.T) {
 	}
 }
 
+// FG-016 must not flag local actions when fork code goes to a subdir AND an
+// earlier checkout pulled a trusted ref into the workspace root. Regression
+// for a 36-FP cluster from a defensively-engineered workflow template that
+// uses the trusted-ref-first / fork-in-subdir pattern.
+func TestCheckLocalActionUntrustedCheckout_TrustedRefIsolated(t *testing.T) {
+	wf := loadFixture(t, "local-action-trusted-ref-isolated.yaml")
+	findings := CheckLocalActionUntrustedCheckout(wf)
+	if len(findings) != 0 {
+		t.Fatalf("expected 0 findings for trusted-ref isolation pattern, got %d: %v", len(findings), findings)
+	}
+}
+
 // --- FG-017 GitHub Script Injection tests ---
 
 func TestCheckGitHubScriptInjection(t *testing.T) {

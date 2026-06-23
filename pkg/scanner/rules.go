@@ -2376,9 +2376,11 @@ func CheckLocalActionUntrustedCheckout(wf *Workflow) []Finding {
 	var findings []Finding
 	for jobName, job := range wf.Jobs {
 		checkoutIdx := -1
+		forkCheckoutPath := ""
 		for i, step := range job.Steps {
 			if isCheckoutAction(step.Uses) && refPointsToPRHead(step.With["ref"]) {
 				checkoutIdx = i
+				forkCheckoutPath = step.With["path"]
 				break
 			}
 			if step.Run != "" && runFetchesPRHead(step.Run) {
@@ -2387,6 +2389,14 @@ func CheckLocalActionUntrustedCheckout(wf *Workflow) []Finding {
 			}
 		}
 		if checkoutIdx == -1 {
+			continue
+		}
+
+		// Trusted-ref isolation: if the fork checkout lands in a subdir and a
+		// prior checkout in the same job used a trusted ref to the workspace
+		// root, local action references at './' load from the trusted ref, not
+		// the fork. Suppress the finding in that case.
+		if localActionsTrustedRefIsolated(job, checkoutIdx, forkCheckoutPath) {
 			continue
 		}
 
@@ -2410,6 +2420,34 @@ func CheckLocalActionUntrustedCheckout(wf *Workflow) []Finding {
 		}
 	}
 	return findings
+}
+
+// localActionsTrustedRefIsolated returns true when the job's fork checkout
+// goes into a subdirectory AND an earlier checkout in the same job pulled a
+// trusted ref into the workspace root. In that case, references like
+// './.github/actions/foo' resolve to the trusted-ref checkout, not the fork.
+//
+// The defensive pattern: first `actions/checkout` uses a trusted ref env var
+// (resolving to refs/heads/main or refs/heads/<base_ref>), then a second
+// checkout puts the PR head in `path: "pr-branch"`.
+func localActionsTrustedRefIsolated(job Job, forkCheckoutIdx int, forkPath string) bool {
+	if forkPath == "" || forkPath == "." {
+		return false
+	}
+	for i := 0; i < forkCheckoutIdx; i++ {
+		step := job.Steps[i]
+		if !isCheckoutAction(step.Uses) {
+			continue
+		}
+		path := step.With["path"]
+		if path != "" && path != "." {
+			continue
+		}
+		if isTrustedRef(step.With["ref"]) {
+			return true
+		}
+	}
+	return false
 }
 
 // CheckGitHubScriptInjection detects expression injection in actions/github-script (FG-017).
