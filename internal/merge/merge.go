@@ -42,6 +42,7 @@ type sourceFinding struct {
 	Description  string `db:"description"`
 	Details      string `db:"details"`
 	CreatedAt    string `db:"created_at"`
+	WorkflowHash string `db:"workflow_hash"`
 }
 
 // sourceDisclosure mirrors the disclosures table.
@@ -194,9 +195,9 @@ func mergeSource(target *sqlx.DB, source *sqlx.DB, stats *MergeStats) error {
 		}
 
 		res, err := target.Exec(
-			`INSERT INTO findings (repo_id, workflow_path, rule_id, severity, line_number, description, details, created_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			targetRepoID, f.WorkflowPath, f.RuleID, f.Severity, f.LineNumber, f.Description, f.Details, f.CreatedAt,
+			`INSERT INTO findings (repo_id, workflow_path, rule_id, severity, line_number, description, details, created_at, workflow_hash)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			targetRepoID, f.WorkflowPath, f.RuleID, f.Severity, f.LineNumber, f.Description, f.Details, f.CreatedAt, f.WorkflowHash,
 		)
 		if err != nil {
 			return fmt.Errorf("inserting finding: %w", err)

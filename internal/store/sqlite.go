@@ -80,6 +80,7 @@ func runMigrations(db *sqlx.DB) {
 	db.Exec(migration003Patches)
 	db.Exec(migration004NoWorkflows)
 	db.Exec(migration005AddRepoLists)
+	db.Exec(migration006AddWorkflowHash)
 }
 
 // RepoListEntry holds a cached repo from a saved list.
@@ -205,9 +206,9 @@ func (d *DB) SaveResultWithSource(owner, name string, stars int, language string
 
 	for _, f := range result.Findings {
 		_, err := tx.Exec(
-			`INSERT INTO findings (repo_id, workflow_path, rule_id, severity, line_number, description, details)
-			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			repoID, f.File, f.RuleID, f.Severity, f.Line, f.Message, f.Details,
+			`INSERT INTO findings (repo_id, workflow_path, rule_id, severity, line_number, description, details, workflow_hash)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			repoID, f.File, f.RuleID, f.Severity, f.Line, f.Message, f.Details, f.WorkflowHash,
 		)
 		if err != nil {
 			return fmt.Errorf("inserting finding: %w", err)

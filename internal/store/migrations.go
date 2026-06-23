@@ -78,6 +78,11 @@ CREATE TABLE IF NOT EXISTS patches (
 CREATE INDEX IF NOT EXISTS idx_patches_disclosure ON patches(disclosure_id);
 `
 
+const migration006AddWorkflowHash = `
+ALTER TABLE findings ADD COLUMN workflow_hash TEXT DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_findings_workflow_hash ON findings(workflow_hash);
+`
+
 const migration005AddRepoLists = `
 CREATE TABLE IF NOT EXISTS repo_lists (
     id INTEGER PRIMARY KEY,

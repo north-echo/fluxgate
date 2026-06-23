@@ -159,6 +159,16 @@ func ScanWorkflow(wf *Workflow, opts ScanOptions) []Finding {
 	// Post-scan correlation: merge FG-001+FG-002 co-occurrences
 	findings = CorrelatePwnRequestInjection(findings)
 
+	// Stamp the workflow hash on every finding so template-propagation queries
+	// can group identical workflows across repos without re-reading source.
+	if wf.Hash != "" {
+		for i := range findings {
+			if findings[i].WorkflowHash == "" {
+				findings[i].WorkflowHash = wf.Hash
+			}
+		}
+	}
+
 	if len(opts.Severities) > 0 {
 		sevSet := make(map[string]bool)
 		for _, s := range opts.Severities {

@@ -88,6 +88,47 @@ func TestSaveResult_RescanRepoIDIsCanonical(t *testing.T) {
 	}
 }
 
+// workflow_hash must be persisted with each finding so template-propagation
+// queries (`fluxgate templates`) can group identical workflows across repos.
+func TestSaveResult_WorkflowHashPersisted(t *testing.T) {
+	db := newTestDB(t)
+	shared := "deadbeefcafef00d"
+	for _, owner := range []string{"orgA", "orgB", "orgC"} {
+		if err := db.SaveResult(owner, "repo", 0, "", &scanner.ScanResult{
+			Workflows: 1,
+			Findings: []scanner.Finding{
+				{File: ".github/workflows/ci.yaml", RuleID: "FG-022",
+					Severity: "critical", Line: 1, Message: "m", Details: "d",
+					WorkflowHash: shared},
+			},
+		}); err != nil {
+			t.Fatalf("save %s: %v", owner, err)
+		}
+	}
+	var clusters int
+	err := db.SqlxDB().Get(&clusters, `
+		SELECT COUNT(*) FROM (
+			SELECT workflow_hash, COUNT(DISTINCT repo_id) c
+			FROM findings WHERE workflow_hash != ''
+			GROUP BY workflow_hash HAVING c >= 2
+		)`)
+	if err != nil {
+		t.Fatalf("cluster query: %v", err)
+	}
+	if clusters != 1 {
+		t.Fatalf("expected 1 template cluster spanning 3 repos, got %d", clusters)
+	}
+
+	var repoCount int
+	if err := db.SqlxDB().Get(&repoCount,
+		`SELECT COUNT(DISTINCT repo_id) FROM findings WHERE workflow_hash = ?`, shared); err != nil {
+		t.Fatalf("repo-count query: %v", err)
+	}
+	if repoCount != 3 {
+		t.Fatalf("expected hash to span 3 repos, got %d", repoCount)
+	}
+}
+
 // Fresh insert without rescan should also produce a canonical repo_id.
 func TestSaveResult_FreshInsertRepoIDIsCanonical(t *testing.T) {
 	db := newTestDB(t)

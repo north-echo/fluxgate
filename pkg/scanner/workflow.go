@@ -1,6 +1,8 @@
 package scanner
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +15,7 @@ import (
 type Workflow struct {
 	Name             string
 	Path             string
+	Hash             string // SHA-256 hex of the raw YAML bytes; used for template-propagation dedup
 	On               TriggerConfig
 	Env              map[string]string
 	NPMIgnoreScripts bool
@@ -140,8 +143,11 @@ func ParseWorkflow(data []byte, path string) (*Workflow, error) {
 		return nil, fmt.Errorf("decoding %s: %w", path, err)
 	}
 
+	hash := sha256.Sum256(data)
+
 	wf := &Workflow{
 		Name:        raw.Name,
+		Hash:        hex.EncodeToString(hash[:]),
 		Path:        path,
 		On:          parseTriggers(&raw.On),
 		Env:         raw.Env,
