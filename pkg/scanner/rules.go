@@ -2181,37 +2181,29 @@ func CheckIfAlwaysTrue(wf *Workflow) []Finding {
 func CheckAllSecretsExposed(wf *Workflow) []Finding {
 	var findings []Finding
 
-	dangerousPatterns := []string{
-		"toJSON(secrets)",
-		"tojson(secrets)",
-		"secrets[",
-	}
-
 	isRiskyTrigger := wf.On.PullRequestTarget || wf.On.IssueComment
 
 	checkContent := func(content string, step Step) {
-		lower := strings.ToLower(content)
-		for _, pat := range dangerousPatterns {
-			if strings.Contains(lower, strings.ToLower(pat)) {
-				severity := SeverityHigh
-				if isRiskyTrigger {
-					severity = SeverityCritical
-				}
-				findings = append(findings, Finding{
-					RuleID:   "FG-013",
-					Severity: severity,
-					File:     wf.Path,
-					Line:     step.Line,
-					Message: fmt.Sprintf(
-						"All Secrets Exposed: '%s' in step (line %d) dumps all repository secrets",
-						pat, step.Line),
-					Details: "Using toJSON(secrets) or dynamic secrets[] access exposes every " +
-						"repository secret in the job. If any attacker-controlled code runs in " +
-						"the same job, all secrets can be exfiltrated.",
-				})
-				return
-			}
+		pat := matchedDangerousSecretsPattern(content)
+		if pat == "" {
+			return
 		}
+		severity := SeverityHigh
+		if isRiskyTrigger {
+			severity = SeverityCritical
+		}
+		findings = append(findings, Finding{
+			RuleID:   "FG-013",
+			Severity: severity,
+			File:     wf.Path,
+			Line:     step.Line,
+			Message: fmt.Sprintf(
+				"All Secrets Exposed: '%s' in step (line %d) dumps all repository secrets",
+				pat, step.Line),
+			Details: "Using toJSON(secrets) or dynamic secrets[] access exposes every " +
+				"repository secret in the job. If any attacker-controlled code runs in " +
+				"the same job, all secrets can be exfiltrated.",
+		})
 	}
 
 	for _, job := range wf.Jobs {
@@ -2228,6 +2220,41 @@ func CheckAllSecretsExposed(wf *Workflow) []Finding {
 		}
 	}
 	return findings
+}
+
+// matchedDangerousSecretsPattern returns the matched pattern name if the content
+// dumps all secrets (toJSON(secrets)) or accesses secrets with a dynamic key
+// (secrets[<expr>] where <expr> is not a static string literal). Returns "" if
+// none match. secrets['LITERAL'] and secrets["LITERAL"] are equivalent to dot
+// notation (secrets.LITERAL) and are NOT flagged.
+func matchedDangerousSecretsPattern(content string) string {
+	lower := strings.ToLower(content)
+	if strings.Contains(lower, "tojson(secrets)") {
+		return "toJSON(secrets)"
+	}
+	idx := 0
+	for {
+		hit := strings.Index(lower[idx:], "secrets[")
+		if hit == -1 {
+			return ""
+		}
+		absStart := idx + hit + len("secrets[")
+		if absStart >= len(content) {
+			return ""
+		}
+		c := content[absStart]
+		// Static literal key — semantically equivalent to secrets.KEY, safe.
+		if c == '\'' || c == '"' {
+			quote := c
+			rest := content[absStart+1:]
+			end := strings.IndexByte(rest, quote)
+			if end >= 0 && end+1 < len(rest) && rest[end+1] == ']' {
+				idx = absStart + 1 + end + 2
+				continue
+			}
+		}
+		return "secrets["
+	}
 }
 
 // CheckMissingPermsRisky detects missing permissions blocks on risky triggers (FG-014).

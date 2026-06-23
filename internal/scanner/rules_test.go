@@ -947,6 +947,17 @@ func TestCheckAllSecretsExposed_Safe(t *testing.T) {
 	}
 }
 
+// FG-013 must not flag secrets['LITERAL'] / secrets["LITERAL"] — semantically
+// equivalent to secrets.LITERAL. Regression for an 11-FP cluster from a
+// publish workflow that used bracket syntax with static keys.
+func TestCheckAllSecretsExposed_StaticLiteralKeys(t *testing.T) {
+	wf := loadFixture(t, "all-secrets-static-literal-keys.yaml")
+	findings := CheckAllSecretsExposed(wf)
+	if len(findings) != 0 {
+		t.Fatalf("expected 0 findings for static-literal secret keys, got %d: %v", len(findings), findings)
+	}
+}
+
 // --- FG-014 Missing Permissions on Risky Events tests ---
 
 func TestCheckMissingPermsRisky(t *testing.T) {
