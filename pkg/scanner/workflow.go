@@ -76,6 +76,13 @@ type Step struct {
 	Run  string
 	Env  map[string]string
 	Line int
+
+	// runSegs caches the parsed shell segments of Run, computed once at
+	// parse time. Several rules and helpers analyze the same run block;
+	// without the cache each re-splits lines and shell separators.
+	// Hand-built Steps (tests, library callers) leave it nil and helpers
+	// compute on the fly. Access via runShellSegments, never directly.
+	runSegs []string
 }
 
 // rawWorkflow is the intermediate representation for YAML unmarshalling.
@@ -173,13 +180,14 @@ func ParseWorkflow(data []byte, path string) (*Workflow, error) {
 		}
 		for i, rawS := range rawJ.Steps {
 			step := Step{
-				ID:   rawS.ID,
-				Name: rawS.Name,
-				If:   rawS.If,
-				Uses: rawS.Uses,
-				With: rawS.With,
-				Run:  rawS.Run,
-				Env:  rawS.Env,
+				ID:      rawS.ID,
+				Name:    rawS.Name,
+				If:      rawS.If,
+				Uses:    rawS.Uses,
+				With:    rawS.With,
+				Run:     rawS.Run,
+				Env:     rawS.Env,
+				runSegs: buildRunSegments(rawS.Run),
 			}
 			// Try to get line number from our extracted map
 			if line, ok := stepLines[stepKey{jobName, i}]; ok {

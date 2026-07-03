@@ -250,20 +250,21 @@ func analyzePostCheckoutExecution(steps []Step) ExecutionAnalysis {
 
 		// Check run: blocks
 		if step.Run != "" {
-			if cmd, found := matchesBuildCommand(step.Run); found {
+			segs := runShellSegments(step)
+			if cmd, found := matchesBuildCommand(segs); found {
 				return ExecutionAnalysis{
 					Confirmed: true,
 					Detail:    fmt.Sprintf("run block executes '%s' on checked-out code (line %d)", cmd, step.Line),
 				}
 			}
-			if cmd, found := matchesConfigLoadingTool(step.Run); found {
+			if cmd, found := matchesConfigLoadingTool(segs); found {
 				return ExecutionAnalysis{
 					Likely: true,
 					Detail: fmt.Sprintf("run block invokes '%s' which loads config from repo (line %d)", cmd, step.Line),
 				}
 			}
 			// If there's a setup action and a run block, it likely executes repo code
-			if hasSetupAction && !isReadOnlyRun(step.Run) && !isPipNamedPackageOnly(step.Run) && !isSafeFormattingRun(step.Run) {
+			if hasSetupAction && !isReadOnlyRun(segs) && !isPipNamedPackageOnly(segs) && !isSafeFormattingRun(segs) {
 				return ExecutionAnalysis{
 					Likely: true,
 					Detail: fmt.Sprintf("run block after setup action may execute repo code (line %d)", step.Line),
@@ -277,6 +278,40 @@ func analyzePostCheckoutExecution(steps []Step) ExecutionAnalysis {
 		Likely:    false,
 		Detail:    "no code execution detected in post-checkout steps",
 	}
+}
+
+// buildRunSegments splits a run block into trimmed shell command segments:
+// newline-separated lines with blanks and comments removed, each split on
+// shell separators. This is the shared pre-computation for the run-analysis
+// helpers below; it runs once per step at parse time (see Step.runSegs).
+func buildRunSegments(run string) []string {
+	if run == "" {
+		return nil
+	}
+	var segs []string
+	for _, line := range strings.Split(run, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		for _, seg := range splitShellCommands(line) {
+			seg = strings.TrimSpace(seg)
+			if seg == "" {
+				continue
+			}
+			segs = append(segs, seg)
+		}
+	}
+	return segs
+}
+
+// runShellSegments returns the cached shell segments for a step, computing
+// them on the fly for hand-built Steps that never went through ParseWorkflow.
+func runShellSegments(step Step) []string {
+	if step.runSegs != nil || step.Run == "" {
+		return step.runSegs
+	}
+	return buildRunSegments(step.Run)
 }
 
 // splitShellCommands splits a shell line on &&, ||, ;, and |.
@@ -385,29 +420,17 @@ func stripPipFlags(args string) string {
 
 // isSafeFormattingRun checks if a run block only invokes safe formatting tools
 // that process code but don't execute it.
-func isSafeFormattingRun(run string) bool {
-	lines := strings.Split(run, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
+func isSafeFormattingRun(segs []string) bool {
+	for _, seg := range segs {
+		isSafe := false
+		for _, tool := range safeFormattingTools {
+			if strings.HasPrefix(seg, tool+" ") || seg == tool {
+				isSafe = true
+				break
+			}
 		}
-		segments := splitShellCommands(line)
-		for _, seg := range segments {
-			seg = strings.TrimSpace(seg)
-			if seg == "" {
-				continue
-			}
-			isSafe := false
-			for _, tool := range safeFormattingTools {
-				if strings.HasPrefix(seg, tool+" ") || seg == tool {
-					isSafe = true
-					break
-				}
-			}
-			if !isSafe {
-				return false
-			}
+		if !isSafe {
+			return false
 		}
 	}
 	return true
@@ -415,93 +438,62 @@ func isSafeFormattingRun(run string) bool {
 
 // isPipNamedPackageOnly checks if a run block only contains pip install
 // of named packages (not local paths or requirements files).
-func isPipNamedPackageOnly(run string) bool {
-	lines := strings.Split(run, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		segments := splitShellCommands(line)
-		for _, seg := range segments {
-			seg = strings.TrimSpace(seg)
-			if seg == "" {
-				continue
-			}
-			isPipInstall := false
-			for _, prefix := range []string{"pip install", "pip3 install"} {
-				if strings.HasPrefix(seg, prefix+" ") || seg == prefix {
-					pipArgs := strings.TrimPrefix(seg, prefix)
-					confirmed, _ := ClassifyPipInstall(pipArgs)
-					if confirmed {
-						return false // local install = executing checkout code
-					}
-					isPipInstall = true
-					break
+func isPipNamedPackageOnly(segs []string) bool {
+	for _, seg := range segs {
+		isPipInstall := false
+		for _, prefix := range []string{"pip install", "pip3 install"} {
+			if strings.HasPrefix(seg, prefix+" ") || seg == prefix {
+				pipArgs := strings.TrimPrefix(seg, prefix)
+				confirmed, _ := ClassifyPipInstall(pipArgs)
+				if confirmed {
+					return false // local install = executing checkout code
 				}
+				isPipInstall = true
+				break
 			}
-			if !isPipInstall {
-				return false // non-pip command present
-			}
+		}
+		if !isPipInstall {
+			return false // non-pip command present
 		}
 	}
 	return true
 }
 
 // matchesBuildCommand checks if a run block contains a known build command.
-func matchesBuildCommand(run string) (string, bool) {
-	lines := strings.Split(run, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		segments := splitShellCommands(line)
-		for _, seg := range segments {
-			seg = strings.TrimSpace(seg)
-
-			// Special handling for pip install — classify by argument
-			for _, prefix := range []string{"pip install", "pip3 install"} {
-				if strings.HasPrefix(seg, prefix+" ") || seg == prefix {
-					pipArgs := strings.TrimPrefix(seg, prefix)
-					confirmed, _ := ClassifyPipInstall(pipArgs)
-					if confirmed {
-						return seg, true
-					}
-					goto nextSeg // named package install, skip
+func matchesBuildCommand(segs []string) (string, bool) {
+	for _, seg := range segs {
+		// Special handling for pip install — classify by argument
+		for _, prefix := range []string{"pip install", "pip3 install"} {
+			if strings.HasPrefix(seg, prefix+" ") || seg == prefix {
+				pipArgs := strings.TrimPrefix(seg, prefix)
+				confirmed, _ := ClassifyPipInstall(pipArgs)
+				if confirmed {
+					return seg, true
 				}
+				goto nextSeg // named package install, skip
 			}
-
-			for _, cmd := range confirmedBuildCommands {
-				if strings.HasPrefix(seg, cmd+" ") || seg == cmd {
-					return cmd, true
-				}
-			}
-			// Check for relative path execution
-			if strings.HasPrefix(seg, "./") {
-				return seg, true
-			}
-		nextSeg:
 		}
+
+		for _, cmd := range confirmedBuildCommands {
+			if strings.HasPrefix(seg, cmd+" ") || seg == cmd {
+				return cmd, true
+			}
+		}
+		// Check for relative path execution
+		if strings.HasPrefix(seg, "./") {
+			return seg, true
+		}
+	nextSeg:
 	}
 	return "", false
 }
 
 // matchesConfigLoadingTool checks if a run block invokes a config-loading tool.
-func matchesConfigLoadingTool(run string) (string, bool) {
-	lines := strings.Split(run, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		segments := splitShellCommands(line)
-		for _, seg := range segments {
-			seg = strings.TrimSpace(seg)
-			for _, tool := range configLoadingTools {
-				if strings.HasPrefix(seg, tool+" ") || seg == tool {
-					return tool, true
-				}
+func matchesConfigLoadingTool(segs []string) (string, bool) {
+	for _, seg := range segs {
+		for _, tool := range configLoadingTools {
+			if strings.HasPrefix(seg, tool+" ") || seg == tool {
+				return tool, true
 			}
 		}
 	}
@@ -509,29 +501,17 @@ func matchesConfigLoadingTool(run string) (string, bool) {
 }
 
 // isReadOnlyRun checks if a run block only contains read-only commands.
-func isReadOnlyRun(run string) bool {
-	lines := strings.Split(run, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
+func isReadOnlyRun(segs []string) bool {
+	for _, seg := range segs {
+		isReadOnly := false
+		for _, ro := range readOnlyCommands {
+			if strings.HasPrefix(seg, ro+" ") || seg == ro {
+				isReadOnly = true
+				break
+			}
 		}
-		segments := splitShellCommands(line)
-		for _, seg := range segments {
-			seg = strings.TrimSpace(seg)
-			if seg == "" {
-				continue
-			}
-			isReadOnly := false
-			for _, ro := range readOnlyCommands {
-				if strings.HasPrefix(seg, ro+" ") || seg == ro {
-					isReadOnly = true
-					break
-				}
-			}
-			if !isReadOnly {
-				return false
-			}
+		if !isReadOnly {
+			return false
 		}
 	}
 	return true
@@ -835,9 +815,10 @@ func CheckTokenExposure(wf *Workflow) []Finding {
 			if isTokenBlanked(step) {
 				hasAnyBlanked = true
 			} else {
-				if _, found := matchesBuildCommand(step.Run); found {
+				segs := runShellSegments(step)
+				if _, found := matchesBuildCommand(segs); found {
 					unblankedExecSteps = append(unblankedExecSteps, step)
-				} else if _, found := matchesConfigLoadingTool(step.Run); found {
+				} else if _, found := matchesConfigLoadingTool(segs); found {
 					unblankedExecSteps = append(unblankedExecSteps, step)
 				}
 			}
@@ -920,7 +901,7 @@ func analyzeMitigations(wf *Workflow, job Job, checkoutIdx int, postCheckoutStep
 
 	// 5. Check if GITHUB_TOKEN is blanked on execution steps
 	for _, step := range postCheckoutSteps {
-		if step.Run != "" && !isReadOnlyRun(step.Run) {
+		if step.Run != "" && !isReadOnlyRun(runShellSegments(step)) {
 			if isTokenBlanked(step) {
 				m.TokenBlanked = true
 			}
