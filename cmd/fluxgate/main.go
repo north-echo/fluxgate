@@ -333,12 +333,13 @@ func newBatchCmd() *cobra.Command {
 			}
 
 			batchOpts := ghclient.BatchOptions{
-				Top:    top,
-				List:   list,
-				Resume: resume,
-				Delay:  delay,
-				DB:     db,
-				Opts:   parseScanOpts(severities, rules),
+				Top:         top,
+				List:        list,
+				Resume:      resume,
+				Delay:       delay,
+				Concurrency: concurrency,
+				DB:          db,
+				Opts:        parseScanOpts(severities, rules),
 			}
 
 			if err := client.BatchScan(ctx, repos, batchOpts); err != nil {
@@ -363,9 +364,9 @@ func newBatchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&tokens, "tokens", "", "Comma-separated GitHub tokens for PAT rotation (default: $GITHUB_TOKENS)")
 	cmd.Flags().StringVar(&severities, "severity", "", "Filter by severity (comma-separated)")
 	cmd.Flags().StringVar(&rules, "rules", "", "Filter by rule ID (comma-separated)")
-	cmd.Flags().DurationVar(&delay, "delay", 0, "Delay between repos to avoid rate limits (e.g. 1s, 500ms)")
+	cmd.Flags().DurationVar(&delay, "delay", 0, "Delay between repos when the rate budget runs low (e.g. 1s, 500ms)")
 	cmd.Flags().BoolVar(&useClone, "clone", false, "Use git sparse checkout instead of API (avoids rate limits)")
-	cmd.Flags().IntVar(&concurrency, "concurrency", 5, "Number of concurrent clone operations (used with --clone)")
+	cmd.Flags().IntVar(&concurrency, "concurrency", 5, "Number of concurrent repo scans (API and --clone modes)")
 	cmd.Flags().StringVar(&keepDir, "keep", "", "Keep cloned repos in this directory instead of cleaning up")
 
 	return cmd
@@ -550,10 +551,11 @@ func newDiscoverCmd() *cobra.Command {
 			}
 
 			batchOpts := ghclient.BatchOptions{
-				Resume: resume,
-				Delay:  delay,
-				DB:     db,
-				Opts:   parseScanOpts(severities, rules),
+				Resume:      resume,
+				Delay:       delay,
+				Concurrency: concurrency,
+				DB:          db,
+				Opts:        parseScanOpts(severities, rules),
 			}
 
 			return client.BatchScan(ctx, repos, batchOpts)
@@ -572,7 +574,7 @@ func newDiscoverCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&listOnly, "list-only", false, "Output repo list without scanning")
 	cmd.Flags().StringVarP(&output, "output", "o", "", "Output file for --list-only (default: stdout)")
 	cmd.Flags().BoolVar(&useClone, "clone", false, "Use git sparse checkout instead of API (avoids rate limits)")
-	cmd.Flags().IntVar(&concurrency, "concurrency", 5, "Number of concurrent clone operations (used with --clone)")
+	cmd.Flags().IntVar(&concurrency, "concurrency", 5, "Number of concurrent repo scans (API and --clone modes)")
 	cmd.Flags().StringVar(&keepDir, "keep", "", "Keep cloned repos in this directory instead of cleaning up")
 
 	return cmd

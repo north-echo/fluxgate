@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	gh "github.com/google/go-github/v60/github"
 	"github.com/north-echo/fluxgate/internal/scanner"
@@ -19,6 +20,10 @@ type Client struct {
 	clients []*gh.Client  // one client per token
 	mu      sync.Mutex
 	idx     int           // current token index
+
+	// remaining tracks the most recently observed core rate-limit budget
+	// across all goroutines. -1 means no response observed yet.
+	remaining atomic.Int64
 }
 
 // NewClient creates a GitHub API client. If token is empty, uses unauthenticated access.
@@ -26,15 +31,16 @@ func NewClient(token string) *Client {
 	if token != "" {
 		return NewClientWithTokens([]string{token})
 	}
-	client := gh.NewClient(nil)
-	return &Client{gh: client}
+	c := &Client{gh: gh.NewClient(nil)}
+	c.remaining.Store(-1)
+	return c
 }
 
 // NewClientWithTokens creates a client that round-robins across multiple PATs.
 // When one token hits rate limits, the client automatically switches to the next.
 func NewClientWithTokens(tokens []string) *Client {
 	if len(tokens) == 0 {
-		return &Client{gh: gh.NewClient(nil)}
+		return NewClient("")
 	}
 
 	clients := make([]*gh.Client, len(tokens))
@@ -44,12 +50,23 @@ func NewClientWithTokens(tokens []string) *Client {
 		clients[i] = gh.NewClient(tc)
 	}
 
-	return &Client{
+	c := &Client{
 		gh:      clients[0],
 		tokens:  tokens,
 		clients: clients,
 		idx:     0,
 	}
+	c.remaining.Store(-1)
+	return c
+}
+
+// current returns the active gh client. Callers must go through this rather
+// than reading c.gh directly: rotateToken swaps it under the mutex, and
+// BatchScan runs API calls from concurrent workers.
+func (c *Client) current() *gh.Client {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.gh
 }
 
 // rotateToken switches to the next token in the pool. Returns true if a new
@@ -63,6 +80,19 @@ func (c *Client) rotateToken() bool {
 	c.idx = (c.idx + 1) % len(c.clients)
 	c.gh = c.clients[c.idx]
 	return true
+}
+
+// noteRate records the rate-limit budget from an API response.
+func (c *Client) noteRate(resp *gh.Response) {
+	if resp != nil && resp.Rate.Limit > 0 {
+		c.remaining.Store(int64(resp.Rate.Remaining))
+	}
+}
+
+// rateRemaining returns the most recently observed core rate-limit budget,
+// or -1 if no authenticated response has been observed yet.
+func (c *Client) rateRemaining() int64 {
+	return c.remaining.Load()
 }
 
 // tokenCount returns the number of configured tokens.
@@ -84,7 +114,7 @@ func (c *Client) FetchWorkflows(ctx context.Context, owner, repo string) ([]Work
 	// List contents of .github/workflows/
 	entries, err := withRetryRotate(ctx, c, func() retryableFunc[[]*gh.RepositoryContent] {
 		return func(ctx context.Context) ([]*gh.RepositoryContent, *gh.Response, error) {
-			_, dirContent, resp, err := c.gh.Repositories.GetContents(ctx, owner, repo, ".github/workflows", nil)
+			_, dirContent, resp, err := c.current().Repositories.GetContents(ctx, owner, repo, ".github/workflows", nil)
 			return dirContent, resp, err
 		}
 	})
@@ -118,7 +148,7 @@ func (c *Client) FetchWorkflows(ctx context.Context, owner, repo string) ([]Work
 func (c *Client) fetchFileContent(ctx context.Context, owner, repo, path string) ([]byte, error) {
 	file, err := withRetryRotate(ctx, c, func() retryableFunc[*gh.RepositoryContent] {
 		return func(ctx context.Context) (*gh.RepositoryContent, *gh.Response, error) {
-			fileContent, _, resp, err := c.gh.Repositories.GetContents(ctx, owner, repo, path, nil)
+			fileContent, _, resp, err := c.current().Repositories.GetContents(ctx, owner, repo, path, nil)
 			return fileContent, resp, err
 		}
 	})
@@ -159,7 +189,7 @@ func (c *Client) ScanRemote(ctx context.Context, owner, repo string, opts scanne
 
 // RateLimit returns the current rate limit status.
 func (c *Client) RateLimit(ctx context.Context) (*gh.RateLimits, error) {
-	limits, _, err := c.gh.RateLimit.Get(ctx)
+	limits, _, err := c.current().RateLimit.Get(ctx)
 	if err != nil {
 		return nil, err
 	}

@@ -50,7 +50,7 @@ func (c *Client) DiscoverRepos(ctx context.Context, opts DiscoverOptions) ([]Rep
 
 		result, err := withRetryRotate(ctx, c, func() retryableFunc[*gh.CodeSearchResult] {
 			return func(ctx context.Context) (*gh.CodeSearchResult, *gh.Response, error) {
-				result, resp, err := c.gh.Search.Code(ctx, query, searchOpts)
+				result, resp, err := c.current().Search.Code(ctx, query, searchOpts)
 				return result, resp, err
 			}
 		})
@@ -76,7 +76,7 @@ func (c *Client) DiscoverRepos(ctx context.Context, opts DiscoverOptions) ([]Rep
 			if opts.MinStars > 0 {
 				fullRepo, err := withRetryRotate(ctx, c, func() retryableFunc[*gh.Repository] {
 					return func(ctx context.Context) (*gh.Repository, *gh.Response, error) {
-						r, resp, err := c.gh.Repositories.Get(ctx, owner, name)
+						r, resp, err := c.current().Repositories.Get(ctx, owner, name)
 						return r, resp, err
 					}
 				})

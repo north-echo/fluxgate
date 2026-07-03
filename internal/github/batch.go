@@ -7,6 +7,8 @@ import (
 	"math"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	gh "github.com/google/go-github/v60/github"
@@ -16,13 +18,18 @@ import (
 
 // BatchOptions configures a batch scan.
 type BatchOptions struct {
-	Top    int
-	List   string // path to file with owner/repo per line
-	Resume bool
-	Delay  time.Duration // delay between repos (0 = no delay)
-	DB     *store.DB
-	Opts   scanner.ScanOptions
+	Top         int
+	List        string // path to file with owner/repo per line
+	Resume      bool
+	Delay       time.Duration // delay between repos when rate budget is low (0 = no delay)
+	Concurrency int           // concurrent repo scans (<= 0 means 1)
+	DB          *store.DB
+	Opts        scanner.ScanOptions
 }
+
+// rateReserve is the remaining-quota floor below which workers honor the
+// configured --delay. Above it, sleeping only wastes wall-clock time.
+const rateReserve = 500
 
 // RepoInfo holds basic repo metadata from GitHub search.
 type RepoInfo struct {
@@ -93,7 +100,7 @@ func (c *Client) fetchSearchWindow(ctx context.Context, query string, perPage, l
 
 		result, err := withRetryRotate(ctx, c, func() retryableFunc[*gh.RepositoriesSearchResult] {
 			return func(ctx context.Context) (*gh.RepositoriesSearchResult, *gh.Response, error) {
-				result, resp, err := c.gh.Search.Repositories(ctx, query, searchOpts)
+				result, resp, err := c.current().Search.Repositories(ctx, query, searchOpts)
 				return result, resp, err
 			}
 		})
@@ -157,75 +164,140 @@ func LoadRepoList(path string) ([]RepoInfo, error) {
 }
 
 // BatchScan scans a list of repos and stores results in the database.
+// Repos are fanned out to opts.Concurrency workers; scanning is network-bound
+// (2+ API round trips per repo), so a serial loop leaves the wall clock almost
+// entirely idle. Database writes are already serialized by the store's
+// single-connection pool.
 func (c *Client) BatchScan(ctx context.Context, repos []RepoInfo, opts BatchOptions) error {
 	total := len(repos)
-	scanned := 0
-	skipped := 0
+	if total == 0 {
+		fmt.Println("No repos to scan.")
+		return nil
+	}
+	workers := opts.Concurrency
+	if workers <= 0 {
+		workers = 1
+	}
+	if workers > total {
+		workers = total
+	}
 
-	for i, repo := range repos {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var scanned, skipped, processed atomic.Int64
+	var errOnce sync.Once
+	var firstErr error
+	fail := func(err error) {
+		errOnce.Do(func() {
+			firstErr = err
+			cancel()
+		})
+	}
+
+	jobs := make(chan RepoInfo)
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for repo := range jobs {
+				if ctx.Err() != nil {
+					return
+				}
+				c.scanOne(ctx, repo, opts, total, &scanned, &skipped, &processed, fail)
+			}
+		}()
+	}
+
+feed:
+	for _, repo := range repos {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
-		default:
+			break feed
+		case jobs <- repo:
 		}
+	}
+	close(jobs)
+	wg.Wait()
 
-		// Check for resume
-		if opts.Resume {
-			already, err := opts.DB.IsRepoScanned(repo.Owner, repo.Name)
-			if err != nil {
-				return fmt.Errorf("checking if %s/%s is scanned: %w", repo.Owner, repo.Name, err)
-			}
-			if already {
-				skipped++
-				continue
-			}
-		}
+	if firstErr != nil {
+		return firstErr
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
-		// Check no-workflow cache (skip API call for repos known to have no workflows)
-		if opts.DB.HasNoWorkflows(repo.Owner, repo.Name, 7) {
-			skipped++
-			continue
-		}
+	fmt.Printf("\nBatch complete: %d scanned, %d skipped (already scanned)\n", scanned.Load(), skipped.Load())
+	return nil
+}
 
-		fmt.Printf("[%d/%d] Scanning %s/%s", i+1, total, repo.Owner, repo.Name)
-		if repo.Stars > 0 {
-			fmt.Printf(" (%d stars)", repo.Stars)
-		}
-		fmt.Println()
-
-		result, err := c.ScanRemote(ctx, repo.Owner, repo.Name, opts.Opts)
+// scanOne processes a single repo within a BatchScan worker.
+func (c *Client) scanOne(ctx context.Context, repo RepoInfo, opts BatchOptions, total int, scanned, skipped, processed *atomic.Int64, fail func(error)) {
+	// Check for resume
+	if opts.Resume {
+		already, err := opts.DB.IsRepoScanned(repo.Owner, repo.Name)
 		if err != nil {
-			fmt.Printf("  Error: %v\n", err)
-			// Cache repos with no workflows directory (404 errors)
-			if strings.Contains(err.Error(), "404 Not Found") {
-				opts.DB.MarkNoWorkflows(repo.Owner, repo.Name)
-			}
-			// Store the repo as scanned but with 0 findings so we don't retry
-			emptyResult := &scanner.ScanResult{Path: fmt.Sprintf("%s/%s", repo.Owner, repo.Name)}
-			if saveErr := opts.DB.SaveResult(repo.Owner, repo.Name, repo.Stars, repo.Language, emptyResult); saveErr != nil {
-				fmt.Fprintf(os.Stderr, "  Warning: could not save error state: %v\n", saveErr)
-			}
-			continue
+			fail(fmt.Errorf("checking if %s/%s is scanned: %w", repo.Owner, repo.Name, err))
+			return
 		}
-
-		if err := opts.DB.SaveResult(repo.Owner, repo.Name, repo.Stars, repo.Language, result); err != nil {
-			return fmt.Errorf("saving results for %s/%s: %w", repo.Owner, repo.Name, err)
+		if already {
+			skipped.Add(1)
+			processed.Add(1)
+			return
 		}
+	}
 
-		scanned++
-		if len(result.Findings) > 0 {
-			fmt.Printf("  Found %d issues in %d workflows\n", len(result.Findings), result.Workflows)
+	// Check no-workflow cache (skip API call for repos known to have no workflows)
+	if opts.DB.HasNoWorkflows(repo.Owner, repo.Name, 7) {
+		skipped.Add(1)
+		processed.Add(1)
+		return
+	}
+
+	n := processed.Add(1)
+	header := fmt.Sprintf("[%d/%d] Scanning %s/%s", n, total, repo.Owner, repo.Name)
+	if repo.Stars > 0 {
+		header += fmt.Sprintf(" (%d stars)", repo.Stars)
+	}
+	fmt.Println(header)
+
+	result, err := c.ScanRemote(ctx, repo.Owner, repo.Name, opts.Opts)
+	if err != nil {
+		if ctx.Err() != nil {
+			return
 		}
+		fmt.Printf("  %s/%s error: %v\n", repo.Owner, repo.Name, err)
+		// Cache repos with no workflows directory (404 errors)
+		if strings.Contains(err.Error(), "404 Not Found") {
+			opts.DB.MarkNoWorkflows(repo.Owner, repo.Name)
+		}
+		// Store the repo as scanned but with 0 findings so we don't retry
+		emptyResult := &scanner.ScanResult{Path: fmt.Sprintf("%s/%s", repo.Owner, repo.Name)}
+		if saveErr := opts.DB.SaveResult(repo.Owner, repo.Name, repo.Stars, repo.Language, emptyResult); saveErr != nil {
+			fmt.Fprintf(os.Stderr, "  Warning: could not save error state: %v\n", saveErr)
+		}
+		return
+	}
 
-		if opts.Delay > 0 {
+	if err := opts.DB.SaveResult(repo.Owner, repo.Name, repo.Stars, repo.Language, result); err != nil {
+		fail(fmt.Errorf("saving results for %s/%s: %w", repo.Owner, repo.Name, err))
+		return
+	}
+
+	scanned.Add(1)
+	if len(result.Findings) > 0 {
+		fmt.Printf("  %s/%s: %d issues in %d workflows\n", repo.Owner, repo.Name, len(result.Findings), result.Workflows)
+	}
+
+	// Honor --delay only when the observed rate budget is actually low;
+	// sleeping with thousands of requests remaining wastes wall-clock time.
+	if opts.Delay > 0 {
+		if rem := c.rateRemaining(); rem >= 0 && rem < rateReserve {
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
 			case <-time.After(opts.Delay):
 			}
 		}
 	}
-
-	fmt.Printf("\nBatch complete: %d scanned, %d skipped (already scanned)\n", scanned, skipped)
-	return nil
 }

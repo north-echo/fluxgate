@@ -92,26 +92,30 @@ func withRetry[T any](ctx context.Context, fn retryableFunc[T]) (T, error) {
 // so it can use the current (possibly rotated) client.
 func withRetryRotate[T any](ctx context.Context, c *Client, fnFactory func() retryableFunc[T]) (T, error) {
 	var zero T
-	tokensExhausted := 0
-	for attempt := 0; attempt <= maxRetries; attempt++ {
+	rotations := 0
+	for attempt := 0; attempt <= maxRetries; {
 		fn := fnFactory()
 		result, resp, err := fn(ctx)
+		c.noteRate(resp)
 		if err == nil {
 			return result, nil
 		}
-		if !isRetryable(resp, err) || attempt == maxRetries {
+		if !isRetryable(resp, err) {
 			return zero, err
 		}
 
-		// Try rotating to another token before backing off
-		if isRateLimited(err) && c.rotateToken() {
-			tokensExhausted++
-			if tokensExhausted < c.tokenCount() {
-				fmt.Printf("  Rate limited, rotating to next token (%d/%d)...\n", tokensExhausted+1, c.tokenCount())
-				continue // retry immediately with new token
-			}
-			// All tokens exhausted, fall through to backoff
-			tokensExhausted = 0
+		// Rotating to a fresh token does not consume a retry attempt.
+		// With more tokens than maxRetries, counting rotations against the
+		// budget could exhaust it without a single backoff wait.
+		if isRateLimited(err) && rotations < c.tokenCount()-1 && c.rotateToken() {
+			rotations++
+			fmt.Printf("  Rate limited, rotating to next token (%d/%d)...\n", rotations+1, c.tokenCount())
+			continue // retry immediately with new token
+		}
+		rotations = 0 // all tokens tried; back off, then rotate again
+
+		if attempt == maxRetries {
+			return zero, err
 		}
 
 		wait := backoffDuration(resp, attempt)
@@ -122,6 +126,7 @@ func withRetryRotate[T any](ctx context.Context, c *Client, fnFactory func() ret
 			return zero, ctx.Err()
 		case <-time.After(wait):
 		}
+		attempt++
 	}
 	return zero, fmt.Errorf("exceeded maximum retries")
 }
