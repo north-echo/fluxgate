@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/north-echo/fluxgate/internal/cicd"
 )
@@ -44,6 +46,7 @@ func ScanDirectory(dir string, opts ScanOptions) (*ScanResult, error) {
 			return nil, err
 		}
 
+		var paths []string
 		for _, entry := range entries {
 			if entry.IsDir() {
 				continue
@@ -52,16 +55,51 @@ func ScanDirectory(dir string, opts ScanOptions) (*ScanResult, error) {
 			if !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml") {
 				continue
 			}
+			paths = append(paths, filepath.Join(workflowDir, name))
+		}
 
-			path := filepath.Join(workflowDir, name)
-			wf, err := ParseWorkflowFile(path)
-			if err != nil {
-				continue // skip unparseable files
+		// Files are independent and rule evaluation is CPU-bound, so scan
+		// them concurrently. The cap stays modest because batch --clone
+		// mode already runs ScanDirectory from repo-level goroutines.
+		workers := runtime.NumCPU()
+		if workers > 4 {
+			workers = 4
+		}
+		if workers > len(paths) {
+			workers = len(paths)
+		}
+
+		perFile := make([][]Finding, len(paths))
+		parsed := make([]bool, len(paths))
+		var wg sync.WaitGroup
+		idxCh := make(chan int)
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for i := range idxCh {
+					wf, err := ParseWorkflowFile(paths[i])
+					if err != nil {
+						continue // skip unparseable files
+					}
+					parsed[i] = true
+					// scanWorkflow, not ScanFile: the aggregate is sorted
+					// once below, so per-file sorting would be wasted work.
+					perFile[i] = scanWorkflow(wf, opts)
+				}
+			}()
+		}
+		for i := range paths {
+			idxCh <- i
+		}
+		close(idxCh)
+		wg.Wait()
+
+		for i := range paths {
+			if parsed[i] {
+				result.Workflows++
+				result.Findings = append(result.Findings, perFile[i]...)
 			}
-			// scanWorkflow, not ScanFile: the aggregate is sorted once below,
-			// so per-file sorting would be wasted work.
-			result.Workflows++
-			result.Findings = append(result.Findings, scanWorkflow(wf, opts)...)
 		}
 	}
 
