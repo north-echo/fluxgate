@@ -9,10 +9,10 @@ import (
 
 // CircleCIPipeline represents a parsed .circleci/config.yml file.
 type CircleCIPipeline struct {
-	path      string
-	triggers  []TriggerType
-	jobs      []PipelineJob
-	orbs      []CircleCIOrb
+	path     string
+	triggers []TriggerType
+	jobs     []PipelineJob
+	orbs     []CircleCIOrb
 }
 
 // CircleCIOrb represents an orb reference in a CircleCI config.
@@ -25,9 +25,9 @@ type CircleCIOrb struct {
 
 // rawCircleCIConfig is the intermediate representation for YAML unmarshalling.
 type rawCircleCIConfig struct {
-	Version   string                        `yaml:"version"`
-	Orbs      map[string]string             `yaml:"orbs"`
-	Jobs      map[string]rawCircleCIJob     `yaml:"jobs"`
+	Version   string                         `yaml:"version"`
+	Orbs      map[string]string              `yaml:"orbs"`
+	Jobs      map[string]rawCircleCIJob      `yaml:"jobs"`
 	Workflows map[string]rawCircleCIWorkflow `yaml:"workflows"`
 }
 
@@ -44,8 +44,8 @@ type rawCircleCIDocker struct {
 }
 
 type rawCircleCIWorkflow struct {
-	Jobs     []yaml.Node            `yaml:"jobs"`
-	Triggers []rawCircleCITrigger   `yaml:"triggers"`
+	Jobs     []yaml.Node          `yaml:"jobs"`
+	Triggers []rawCircleCITrigger `yaml:"triggers"`
 }
 
 type rawCircleCITrigger struct {

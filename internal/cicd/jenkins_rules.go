@@ -8,7 +8,6 @@ import (
 // JenkinsFinding is an alias of the shared PlatformFinding type.
 type JenkinsFinding = PlatformFinding
 
-
 // ScanJenkinsPipeline runs all Jenkins security rules against a parsed pipeline.
 func ScanJenkinsPipeline(pipeline *JenkinsPipeline) []JenkinsFinding {
 	var findings []JenkinsFinding

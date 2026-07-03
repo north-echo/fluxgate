@@ -8,12 +8,12 @@ import (
 
 // TektonPipeline represents a parsed Tekton Pipeline or Task manifest.
 type TektonPipeline struct {
-	path      string
-	kind      string // "Pipeline", "Task", "EventListener", "TriggerBinding"
-	triggers  []TriggerType
-	jobs      []PipelineJob
-	params    []TektonParam
-	taskRefs  []TektonTaskRef
+	path     string
+	kind     string // "Pipeline", "Task", "EventListener", "TriggerBinding"
+	triggers []TriggerType
+	jobs     []PipelineJob
+	params   []TektonParam
+	taskRefs []TektonTaskRef
 }
 
 // TektonParam represents a parameter definition in a Tekton resource.
@@ -30,10 +30,10 @@ type TektonTaskRef struct {
 
 // rawTektonResource is the intermediate representation for YAML unmarshalling.
 type rawTektonResource struct {
-	APIVersion string          `yaml:"apiVersion"`
-	Kind       string          `yaml:"kind"`
-	Metadata   rawTektonMeta   `yaml:"metadata"`
-	Spec       rawTektonSpec   `yaml:"spec"`
+	APIVersion string        `yaml:"apiVersion"`
+	Kind       string        `yaml:"kind"`
+	Metadata   rawTektonMeta `yaml:"metadata"`
+	Spec       rawTektonSpec `yaml:"spec"`
 }
 
 type rawTektonMeta struct {
@@ -54,10 +54,10 @@ type rawTektonParam struct {
 }
 
 type rawTektonTask struct {
-	Name     string           `yaml:"name"`
-	TaskRef  *rawTektonRef    `yaml:"taskRef"`
-	TaskSpec *rawTektonSpec   `yaml:"taskSpec"`
-	Params   []rawTektonKV    `yaml:"params"`
+	Name     string         `yaml:"name"`
+	TaskRef  *rawTektonRef  `yaml:"taskRef"`
+	TaskSpec *rawTektonSpec `yaml:"taskSpec"`
+	Params   []rawTektonKV  `yaml:"params"`
 }
 
 type rawTektonRef struct {
@@ -71,12 +71,12 @@ type rawTektonKV struct {
 }
 
 type rawTektonStep struct {
-	Name            string                `yaml:"name"`
-	Image           string                `yaml:"image"`
-	Script          string                `yaml:"script"`
-	Command         []string              `yaml:"command"`
-	Env             []rawTektonEnv        `yaml:"env"`
-	SecurityContext *rawTektonSecCtx      `yaml:"securityContext"`
+	Name            string           `yaml:"name"`
+	Image           string           `yaml:"image"`
+	Script          string           `yaml:"script"`
+	Command         []string         `yaml:"command"`
+	Env             []rawTektonEnv   `yaml:"env"`
+	SecurityContext *rawTektonSecCtx `yaml:"securityContext"`
 }
 
 type rawTektonEnv struct {

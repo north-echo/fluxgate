@@ -66,12 +66,12 @@ type Pipeline interface {
 // PipelineJob represents a single job/stage in a CI/CD pipeline.
 type PipelineJob struct {
 	Name        string
-	Conditions  []string  // Conditional execution rules
-	Environment string    // Environment/deployment protection
-	RunnerType  string    // Runner type (e.g., "hosted", "self-hosted", tag)
+	Conditions  []string // Conditional execution rules
+	Environment string   // Environment/deployment protection
+	RunnerType  string   // Runner type (e.g., "hosted", "self-hosted", tag)
 	Steps       []PipelineStep
-	DependsOn   []string  // Job dependencies
-	Secrets     []string  // Secret references
+	DependsOn   []string // Job dependencies
+	Secrets     []string // Secret references
 	Permissions map[string]string
 	IdTokens    map[string]string // OIDC id_tokens (audience -> token name)
 	CacheKeys   []string          // Cache key patterns
@@ -81,7 +81,7 @@ type PipelineJob struct {
 type PipelineStep struct {
 	Name    string
 	Type    StepType
-	Command string   // Script content or action reference
+	Command string // Script content or action reference
 	Line    int
 	Env     map[string]string
 }
@@ -90,7 +90,7 @@ type PipelineStep struct {
 type StepType string
 
 const (
-	StepScript StepType = "script"  // Shell script execution
-	StepAction StepType = "action"  // Reusable action/template
+	StepScript  StepType = "script"  // Shell script execution
+	StepAction  StepType = "action"  // Reusable action/template
 	StepInclude StepType = "include" // External config include
 )

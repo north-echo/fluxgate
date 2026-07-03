@@ -12,12 +12,12 @@ import (
 
 // overviewData holds template data for the overview page.
 type overviewData struct {
-	Stats           *store.ReportStats
-	Heatmap         map[string]map[string]int // owner -> severity -> count
-	HeatmapOrgs     []string
-	Severities      []string
-	DisclosureStats *store.DisclosureStats
-	TopRepos        []store.Repo
+	Stats            *store.ReportStats
+	Heatmap          map[string]map[string]int // owner -> severity -> count
+	HeatmapOrgs      []string
+	Severities       []string
+	DisclosureStats  *store.DisclosureStats
+	TopRepos         []store.Repo
 	RuleDistribution []ruleBar
 }
 

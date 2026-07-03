@@ -11,9 +11,9 @@ import (
 )
 
 const (
-	maxRetries     = 5
-	baseBackoff    = 1 * time.Second
-	maxBackoff     = 60 * time.Second
+	maxRetries  = 5
+	baseBackoff = 1 * time.Second
+	maxBackoff  = 60 * time.Second
 )
 
 // isRateLimited checks if an error is a GitHub rate limit error.

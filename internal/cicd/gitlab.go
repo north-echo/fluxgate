@@ -9,11 +9,11 @@ import (
 
 // GitLabPipeline represents a parsed .gitlab-ci.yml file.
 type GitLabPipeline struct {
-	path       string
-	triggers   []TriggerType
-	jobs       []PipelineJob
-	includes   []GitLabInclude
-	variables  map[string]string
+	path      string
+	triggers  []TriggerType
+	jobs      []PipelineJob
+	includes  []GitLabInclude
+	variables map[string]string
 }
 
 // GitLabInclude represents an include directive in .gitlab-ci.yml.
@@ -39,30 +39,30 @@ type rawGitLabWorkflow struct {
 }
 
 type rawGitLabRule struct {
-	If        string `yaml:"if"`
-	When      string `yaml:"when"`
-	Exists    string `yaml:"exists"`
-	Changes   string `yaml:"changes"`
+	If        string            `yaml:"if"`
+	When      string            `yaml:"when"`
+	Exists    string            `yaml:"exists"`
+	Changes   string            `yaml:"changes"`
 	Variables map[string]string `yaml:"variables"`
 }
 
 type rawGitLabJob struct {
-	Stage       string            `yaml:"stage"`
-	Image       string            `yaml:"image"`
-	Tags        []string          `yaml:"tags"`
-	Script      yaml.Node         `yaml:"script"`
-	BeforeScript yaml.Node        `yaml:"before_script"`
-	AfterScript yaml.Node         `yaml:"after_script"`
-	Rules       []rawGitLabRule   `yaml:"rules"`
-	Only        yaml.Node         `yaml:"only"`
-	Except      yaml.Node         `yaml:"except"`
-	Environment yaml.Node         `yaml:"environment"`
-	Secrets     yaml.Node         `yaml:"secrets"`
-	Variables   map[string]string `yaml:"variables"`
-	Needs       []string          `yaml:"needs"`
-	Services    yaml.Node         `yaml:"services"`
-	IdTokens    yaml.Node         `yaml:"id_tokens"`
-	Cache       yaml.Node         `yaml:"cache"`
+	Stage        string            `yaml:"stage"`
+	Image        string            `yaml:"image"`
+	Tags         []string          `yaml:"tags"`
+	Script       yaml.Node         `yaml:"script"`
+	BeforeScript yaml.Node         `yaml:"before_script"`
+	AfterScript  yaml.Node         `yaml:"after_script"`
+	Rules        []rawGitLabRule   `yaml:"rules"`
+	Only         yaml.Node         `yaml:"only"`
+	Except       yaml.Node         `yaml:"except"`
+	Environment  yaml.Node         `yaml:"environment"`
+	Secrets      yaml.Node         `yaml:"secrets"`
+	Variables    map[string]string `yaml:"variables"`
+	Needs        []string          `yaml:"needs"`
+	Services     yaml.Node         `yaml:"services"`
+	IdTokens     yaml.Node         `yaml:"id_tokens"`
+	Cache        yaml.Node         `yaml:"cache"`
 }
 
 // Reserved GitLab CI keywords that are NOT job names.

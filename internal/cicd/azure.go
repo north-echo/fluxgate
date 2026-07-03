@@ -34,16 +34,16 @@ type AzureVariable struct {
 
 // rawAzurePipeline is the intermediate representation for YAML unmarshalling.
 type rawAzurePipeline struct {
-	Trigger   yaml.Node              `yaml:"trigger"`
-	PR        yaml.Node              `yaml:"pr"`
-	Schedules []rawAzureSchedule     `yaml:"schedules"`
-	Pool      yaml.Node              `yaml:"pool"`
-	Variables yaml.Node              `yaml:"variables"`
-	Resources yaml.Node              `yaml:"resources"`
-	Extends   *rawAzureExtends       `yaml:"extends"`
-	Stages    []rawAzureStage        `yaml:"stages"`
-	Jobs      []rawAzureJob          `yaml:"jobs"`
-	Steps     []rawAzureStep         `yaml:"steps"`
+	Trigger   yaml.Node          `yaml:"trigger"`
+	PR        yaml.Node          `yaml:"pr"`
+	Schedules []rawAzureSchedule `yaml:"schedules"`
+	Pool      yaml.Node          `yaml:"pool"`
+	Variables yaml.Node          `yaml:"variables"`
+	Resources yaml.Node          `yaml:"resources"`
+	Extends   *rawAzureExtends   `yaml:"extends"`
+	Stages    []rawAzureStage    `yaml:"stages"`
+	Jobs      []rawAzureJob      `yaml:"jobs"`
+	Steps     []rawAzureStep     `yaml:"steps"`
 }
 
 type rawAzureSchedule struct {
@@ -55,13 +55,13 @@ type rawAzureExtends struct {
 }
 
 type rawAzureStage struct {
-	Stage        string         `yaml:"stage"`
-	DisplayName  string         `yaml:"displayName"`
-	DependsOn    yaml.Node      `yaml:"dependsOn"`
-	Condition    string         `yaml:"condition"`
-	Pool         yaml.Node      `yaml:"pool"`
-	Variables    yaml.Node      `yaml:"variables"`
-	Jobs         []rawAzureJob  `yaml:"jobs"`
+	Stage       string        `yaml:"stage"`
+	DisplayName string        `yaml:"displayName"`
+	DependsOn   yaml.Node     `yaml:"dependsOn"`
+	Condition   string        `yaml:"condition"`
+	Pool        yaml.Node     `yaml:"pool"`
+	Variables   yaml.Node     `yaml:"variables"`
+	Jobs        []rawAzureJob `yaml:"jobs"`
 }
 
 type rawAzureJob struct {

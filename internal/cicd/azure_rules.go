@@ -8,7 +8,6 @@ import (
 // AzureFinding is an alias of the shared PlatformFinding type.
 type AzureFinding = PlatformFinding
 
-
 // ScanAzurePipeline runs all Azure Pipelines security rules.
 func ScanAzurePipeline(pipeline *AzurePipeline) []AzureFinding {
 	var findings []AzureFinding

@@ -232,11 +232,11 @@ func (d *DB) SaveResultWithSource(owner, name string, stars int, language string
 
 // ReportStats holds aggregate statistics for reporting.
 type ReportStats struct {
-	ReposScanned    int
-	ReposWithFinds  int
-	TotalFindings   int
-	BySeverity      map[string]int
-	ByRule          map[string]int
+	ReposScanned   int
+	ReposWithFinds int
+	TotalFindings  int
+	BySeverity     map[string]int
+	ByRule         map[string]int
 }
 
 // GetReportStats returns aggregate statistics from the database.

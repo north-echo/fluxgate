@@ -253,7 +253,7 @@ func parseJenkinsStages(stagesBlock string, stagesOff int, defaultAgent string, 
 	return jobs
 }
 
-// Match sh 'command' or sh "command" or sh '''multiline''' or sh """multiline"""
+// Match sh 'command' or sh "command" or sh ”'multiline”' or sh """multiline"""
 // Also match bat variants
 var jenkinsStepPatterns = []struct {
 	re   *regexp.Regexp

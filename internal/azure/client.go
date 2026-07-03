@@ -36,9 +36,9 @@ type repoListResponse struct {
 }
 
 type repoEntry struct {
-	ID            string     `json:"id"`
-	Name          string     `json:"name"`
-	DefaultBranch string     `json:"defaultBranch"`
+	ID            string      `json:"id"`
+	Name          string      `json:"name"`
+	DefaultBranch string      `json:"defaultBranch"`
 	Project       repoProject `json:"project"`
 }
 

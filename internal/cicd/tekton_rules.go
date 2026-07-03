@@ -8,7 +8,6 @@ import (
 // TektonFinding is an alias of the shared PlatformFinding type.
 type TektonFinding = PlatformFinding
 
-
 // ScanTektonPipeline runs all Tekton security rules against a parsed pipeline.
 func ScanTektonPipeline(pipeline *TektonPipeline) []TektonFinding {
 	var findings []TektonFinding
