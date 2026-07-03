@@ -3,15 +3,31 @@ package github
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	gh "github.com/google/go-github/v60/github"
 	"github.com/north-echo/fluxgate/internal/scanner"
 	"golang.org/x/oauth2"
 )
+
+// newAPITransport returns an HTTP transport tuned for many concurrent
+// requests to api.github.com. The default MaxIdleConnsPerHost of 2 churns
+// connections under a worker pool.
+func newAPITransport() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.MaxIdleConnsPerHost = 16
+	return t
+}
+
+// httpTimeout bounds each API request. Without it a single stalled TCP
+// connection hangs a batch scan indefinitely (gitlab/azure clients already
+// set 30s).
+const httpTimeout = 30 * time.Second
 
 // Client wraps the GitHub API for fetching workflow files.
 type Client struct {
@@ -31,7 +47,10 @@ func NewClient(token string) *Client {
 	if token != "" {
 		return NewClientWithTokens([]string{token})
 	}
-	c := &Client{gh: gh.NewClient(nil)}
+	c := &Client{gh: gh.NewClient(&http.Client{
+		Timeout:   httpTimeout,
+		Transport: newAPITransport(),
+	})}
 	c.remaining.Store(-1)
 	return c
 }
@@ -43,10 +62,14 @@ func NewClientWithTokens(tokens []string) *Client {
 		return NewClient("")
 	}
 
+	transport := newAPITransport() // shared: one connection pool across all tokens
 	clients := make([]*gh.Client, len(tokens))
 	for i, t := range tokens {
 		ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: t})
-		tc := oauth2.NewClient(context.Background(), ts)
+		tc := &http.Client{
+			Timeout:   httpTimeout,
+			Transport: &oauth2.Transport{Source: ts, Base: transport},
+		}
 		clients[i] = gh.NewClient(tc)
 	}
 
