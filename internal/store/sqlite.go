@@ -81,6 +81,29 @@ func Open(path string) (*DB, error) {
 	return &DB{db: db}, nil
 }
 
+// OpenReadOnly opens the database with a read-only connection pool sized for
+// concurrent readers — under WAL, readers don't block each other or the
+// writer, but the single-connection pool in Open serializes them anyway.
+// Migrations still need a writable handle, so it briefly opens read-write
+// first. Use for the dashboard and other read-only consumers.
+func OpenReadOnly(path string) (*DB, error) {
+	rw, err := Open(path)
+	if err != nil {
+		return nil, err
+	}
+	rw.Close()
+
+	// _pragma applies per connection, unlike an Exec'd PRAGMA which only
+	// reaches whichever pooled connection ran it.
+	db, err := sqlx.Open("sqlite", path+"?mode=ro&_pragma=busy_timeout(30000)")
+	if err != nil {
+		return nil, fmt.Errorf("opening database read-only: %w", err)
+	}
+	db.SetMaxOpenConns(8)
+
+	return &DB{db: db}, nil
+}
+
 // runMigrations applies incremental schema changes. Each is idempotent.
 func runMigrations(db *sqlx.DB) {
 	db.Exec(migration001AddSource)
@@ -558,6 +581,54 @@ func (d *DB) ListFindings(offset, limit int, severity, ruleID, owner string) ([]
 	var results []FindingWithRepo
 	err := d.db.Select(&results, query, args...)
 	return results, total, err
+}
+
+// StreamFindings iterates all findings matching the filters, calling fn per
+// row. Unlike ListFindings it skips the COUNT query and never materializes
+// the full result set — use for exports.
+func (d *DB) StreamFindings(severity, ruleID, owner string, fn func(FindingWithRepo) error) error {
+	where := "WHERE 1=1"
+	args := []interface{}{}
+
+	if severity != "" {
+		where += " AND f.severity = ?"
+		args = append(args, severity)
+	}
+	if ruleID != "" {
+		where += " AND f.rule_id = ?"
+		args = append(args, ruleID)
+	}
+	if owner != "" {
+		where += " AND r.owner = ?"
+		args = append(args, owner)
+	}
+
+	query := fmt.Sprintf(`
+		SELECT f.*, r.owner, r.name AS repo_name, r.stars
+		FROM findings f
+		JOIN repos r ON r.id = f.repo_id
+		%s
+		ORDER BY CASE f.severity
+			WHEN 'critical' THEN 0 WHEN 'high' THEN 1
+			WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END,
+			r.stars DESC`, where)
+
+	rows, err := d.db.Queryx(query, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var f FindingWithRepo
+		if err := rows.StructScan(&f); err != nil {
+			return err
+		}
+		if err := fn(f); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
 }
 
 // GetSeverityByOrg returns finding counts grouped by org and severity.

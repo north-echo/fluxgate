@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/north-echo/fluxgate/internal/store"
 )
@@ -58,7 +59,17 @@ func (s *Server) overviewHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	db, _ := s.activeDB(r)
+	db, dbName := s.activeDB(r)
+
+	// Serve cached aggregates when fresh; scan databases only change on
+	// a re-scan, and computing this payload is ~9 aggregate queries.
+	s.overviewMu.Lock()
+	entry, ok := s.overviewCache[dbName]
+	s.overviewMu.Unlock()
+	if ok && time.Since(entry.fetched) < overviewTTL {
+		s.renderPage(w, r, "overview", entry.data)
+		return
+	}
 
 	stats, err := db.GetReportStats()
 	if err != nil {
@@ -122,6 +133,10 @@ func (s *Server) overviewHandler(w http.ResponseWriter, r *http.Request) {
 		TopRepos:         topRepos,
 		RuleDistribution: ruleBars,
 	}
+
+	s.overviewMu.Lock()
+	s.overviewCache[dbName] = overviewCacheEntry{data: data, fetched: time.Now()}
+	s.overviewMu.Unlock()
 
 	s.renderPage(w, r, "overview", data)
 }
@@ -197,13 +212,6 @@ func (s *Server) findingsExportHandler(w http.ResponseWriter, r *http.Request) {
 	rule := r.URL.Query().Get("rule")
 	owner := r.URL.Query().Get("owner")
 
-	// Fetch all matching findings (no pagination)
-	findings, _, err := db.ListFindings(0, 1000000, severity, rule, owner)
-	if err != nil {
-		http.Error(w, "failed to export findings: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
 	// Build descriptive filename
 	filename := "fluxgate-findings"
 	if severity != "" {
@@ -219,15 +227,22 @@ func (s *Server) findingsExportHandler(w http.ResponseWriter, r *http.Request) {
 
 	cw := csv.NewWriter(w)
 	cw.Write([]string{"Severity", "Rule", "Owner", "Repo", "Workflow", "Line", "Description", "Details"})
-	for _, f := range findings {
+	// Stream rows straight to the response instead of materializing the
+	// whole result set (the old path loaded up to 1M rows into memory).
+	err := db.StreamFindings(severity, rule, owner, func(f store.FindingWithRepo) error {
 		// Sanitize newlines in description/details for cleaner CSV
 		desc := strings.ReplaceAll(f.Description, "\n", " ")
 		details := strings.ReplaceAll(f.Details, "\n", " ")
-		cw.Write([]string{
+		return cw.Write([]string{
 			f.Severity, f.RuleID, f.Owner, f.RepoName,
-			f.WorkflowPath, fmt.Sprintf("%d", f.LineNumber),
+			f.WorkflowPath, strconv.Itoa(f.LineNumber),
 			desc, details,
 		})
+	})
+	if err != nil {
+		// Headers are already sent; log via the CSV as a trailer comment
+		// is not meaningful — just stop writing.
+		return
 	}
 	cw.Flush()
 }

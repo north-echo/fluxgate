@@ -6,6 +6,8 @@ import (
 	"html/template"
 	"io/fs"
 	"net/http"
+	"sync"
+	"time"
 
 	"github.com/north-echo/fluxgate/internal/store"
 )
@@ -28,7 +30,22 @@ type Server struct {
 	dbsByName map[string]*store.DB
 	pages     map[string]*template.Template
 	mux       http.ServeMux
+
+	// overviewCache memoizes the overview aggregates per database. The
+	// overview issues ~9 aggregate queries (full GROUP BY scans of
+	// findings) per load, and scan databases only change on a re-scan.
+	overviewMu    sync.Mutex
+	overviewCache map[string]overviewCacheEntry
 }
+
+// overviewCacheEntry is a cached overview payload with its fetch time.
+type overviewCacheEntry struct {
+	data    overviewData
+	fetched time.Time
+}
+
+// overviewTTL bounds staleness of the cached overview aggregates.
+const overviewTTL = 60 * time.Second
 
 var funcMap = template.FuncMap{
 	"add": func(a, b int) int { return a + b },
@@ -55,9 +72,10 @@ func NewMulti(dbs []DBEntry) *Server {
 		byName[e.Name] = e.DB
 	}
 	s := &Server{
-		dbs:       dbs,
-		dbsByName: byName,
-		pages:     make(map[string]*template.Template),
+		dbs:           dbs,
+		dbsByName:     byName,
+		pages:         make(map[string]*template.Template),
+		overviewCache: make(map[string]overviewCacheEntry),
 	}
 
 	// Parse each page template independently with the layout so {{define "content"}} doesn't collide
