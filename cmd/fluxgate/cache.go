@@ -24,20 +24,16 @@ func newCacheStatsCmd() *cobra.Command {
 		Use:   "stats",
 		Short: "Show cache statistics",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			db, err := store.Open(dbPath)
-			if err != nil {
-				return fmt.Errorf("opening database: %w", err)
-			}
-			defer db.Close()
+			return withDB(dbPath, func(db *store.DB) error {
+				total, expired := db.NoWorkflowsCacheStats()
 
-			total, expired := db.NoWorkflowsCacheStats()
-
-			fmt.Printf("No-workflow cache statistics:\n")
-			fmt.Printf("  Total cached repos:        %d\n", total)
-			fmt.Printf("  Expired entries (>7 days):  %d\n", expired)
-			fmt.Printf("  Active entries:             %d\n", total-expired)
-			fmt.Printf("  Est. API calls saved/scan:  %d\n", total-expired)
-			return nil
+				fmt.Printf("No-workflow cache statistics:\n")
+				fmt.Printf("  Total cached repos:        %d\n", total)
+				fmt.Printf("  Expired entries (>7 days):  %d\n", expired)
+				fmt.Printf("  Active entries:             %d\n", total-expired)
+				fmt.Printf("  Est. API calls saved/scan:  %d\n", total-expired)
+				return nil
+			})
 		},
 	}
 	cmd.Flags().StringVar(&dbPath, "db", "findings.db", "Database path")
@@ -52,19 +48,15 @@ func newCacheClearCmd() *cobra.Command {
 		Use:   "clear",
 		Short: "Clear expired entries from the no-workflow cache",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			db, err := store.Open(dbPath)
-			if err != nil {
-				return fmt.Errorf("opening database: %w", err)
-			}
-			defer db.Close()
+			return withDB(dbPath, func(db *store.DB) error {
+				cleared, err := db.ClearExpiredNoWorkflows(maxAge)
+				if err != nil {
+					return fmt.Errorf("clearing cache: %w", err)
+				}
 
-			cleared, err := db.ClearExpiredNoWorkflows(maxAge)
-			if err != nil {
-				return fmt.Errorf("clearing cache: %w", err)
-			}
-
-			fmt.Printf("Cleared %d expired cache entries (older than %d days)\n", cleared, maxAge)
-			return nil
+				fmt.Printf("Cleared %d expired cache entries (older than %d days)\n", cleared, maxAge)
+				return nil
+			})
 		},
 	}
 	cmd.Flags().StringVar(&dbPath, "db", "findings.db", "Database path")

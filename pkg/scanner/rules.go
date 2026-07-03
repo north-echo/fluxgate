@@ -3281,27 +3281,23 @@ var knownIOCs = []iocEntry{
 // env values, and with: inputs (FG-025). Hits are critical and high-confidence
 // — only catalog needles tightly tied to a known campaign.
 func CheckKnownIOCs(wf *Workflow) []Finding {
+	type haystack struct {
+		where string
+		text  string
+	}
 	var findings []Finding
+	var haystacks []haystack // reused across steps to avoid per-step allocation
 	for jobName, job := range wf.Jobs {
 		for _, step := range job.Steps {
-			haystacks := []struct {
-				where string
-				text  string
-			}{
-				{"run block", strings.ToLower(step.Run)},
-				{"uses ref", strings.ToLower(step.Uses)},
-			}
+			haystacks = append(haystacks[:0],
+				haystack{"run block", strings.ToLower(step.Run)},
+				haystack{"uses ref", strings.ToLower(step.Uses)},
+			)
 			for k, v := range step.Env {
-				haystacks = append(haystacks, struct {
-					where string
-					text  string
-				}{"env." + k, strings.ToLower(v)})
+				haystacks = append(haystacks, haystack{"env." + k, strings.ToLower(v)})
 			}
 			for k, v := range step.With {
-				haystacks = append(haystacks, struct {
-					where string
-					text  string
-				}{"with." + k, strings.ToLower(v)})
+				haystacks = append(haystacks, haystack{"with." + k, strings.ToLower(v)})
 			}
 
 			// Haystacks are lowercased once above; re-lowercasing inside the

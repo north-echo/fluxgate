@@ -73,36 +73,32 @@ func newDiscoverCmd() *cobra.Command {
 			if dbPath == "" {
 				dbPath = "targeted.db"
 			}
-			db, err := store.Open(dbPath)
-			if err != nil {
-				return fmt.Errorf("opening database: %w", err)
-			}
-			defer db.Close()
-
-			if useClone {
-				var cloneTokens []string
-				if token != "" {
-					cloneTokens = []string{token}
+			return withDB(dbPath, func(db *store.DB) error {
+				if useClone {
+					var cloneTokens []string
+					if token != "" {
+						cloneTokens = []string{token}
+					}
+					return batchScanWithClone(ctx, repos, cloneScanOptions{
+						DB:          db,
+						Tokens:      cloneTokens,
+						ScanOpts:    parseScanOpts(severities, rules),
+						Resume:      resume,
+						Concurrency: concurrency,
+						KeepDir:     keepDir,
+					})
 				}
-				return batchScanWithClone(ctx, repos, cloneScanOptions{
-					DB:          db,
-					Tokens:      cloneTokens,
-					ScanOpts:    parseScanOpts(severities, rules),
+
+				batchOpts := ghclient.BatchOptions{
 					Resume:      resume,
+					Delay:       delay,
 					Concurrency: concurrency,
-					KeepDir:     keepDir,
-				})
-			}
+					DB:          db,
+					Opts:        parseScanOpts(severities, rules),
+				}
 
-			batchOpts := ghclient.BatchOptions{
-				Resume:      resume,
-				Delay:       delay,
-				Concurrency: concurrency,
-				DB:          db,
-				Opts:        parseScanOpts(severities, rules),
-			}
-
-			return client.BatchScan(ctx, repos, batchOpts)
+				return client.BatchScan(ctx, repos, batchOpts)
+			})
 		},
 	}
 

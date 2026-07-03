@@ -40,113 +40,110 @@ func newBatchCmd() *cobra.Command {
 				dbPath = "findings.db"
 			}
 
-			db, err := store.Open(dbPath)
-			if err != nil {
-				return fmt.Errorf("opening database: %w", err)
-			}
-			defer db.Close()
-
-			// Report-only mode
-			if reportPath != "" && top == 0 && list == "" {
-				return generateReport(db, reportPath)
-			}
-
-			// Build the token pool: --tokens/$GITHUB_TOKENS for rotation,
-			// falling back to --token/$GITHUB_TOKEN. Both the API client and
-			// the clone path draw from the same pool.
-			tokens = resolveToken(tokens, "GITHUB_TOKENS")
-			var tokenList []string
-			for _, t := range strings.Split(tokens, ",") {
-				if t = strings.TrimSpace(t); t != "" {
-					tokenList = append(tokenList, t)
+			return withDB(dbPath, func(db *store.DB) error {
+				// Report-only mode
+				if reportPath != "" && top == 0 && list == "" {
+					return generateReport(db, reportPath)
 				}
-			}
-			if len(tokenList) == 0 {
-				token = resolveToken(token, "GITHUB_TOKEN")
-				if token != "" {
-					tokenList = []string{token}
-				}
-			}
-			client := ghclient.NewClientWithTokens(tokenList)
-			if len(tokenList) > 1 {
-				fmt.Printf("Using %d PATs with rotation\n", len(tokenList))
-			}
 
-			if useClone {
-				if err := gitclone.CheckGit(); err != nil {
-					return err
+				// Build the token pool: --tokens/$GITHUB_TOKENS for rotation,
+				// falling back to --token/$GITHUB_TOKEN. Both the API client and
+				// the clone path draw from the same pool.
+				tokens = resolveToken(tokens, "GITHUB_TOKENS")
+				var tokenList []string
+				for _, t := range strings.Split(tokens, ",") {
+					if t = strings.TrimSpace(t); t != "" {
+						tokenList = append(tokenList, t)
+					}
 				}
-			}
-			ctx := context.Background()
+				if len(tokenList) == 0 {
+					token = resolveToken(token, "GITHUB_TOKEN")
+					if token != "" {
+						tokenList = []string{token}
+					}
+				}
+				client := ghclient.NewClientWithTokens(tokenList)
+				if len(tokenList) > 1 {
+					fmt.Printf("Using %d PATs with rotation\n", len(tokenList))
+				}
 
-			var repos []ghclient.RepoInfo
-			if list != "" {
-				repos, err = ghclient.LoadRepoList(list)
-				if err != nil {
-					return fmt.Errorf("loading repo list: %w", err)
+				if useClone {
+					if err := gitclone.CheckGit(); err != nil {
+						return err
+					}
 				}
-			} else if top > 0 {
-				cacheKey := fmt.Sprintf("top:%d", top)
-				if resume {
-					cached, _ := db.LoadRepoList(cacheKey)
-					if cached != nil {
-						fmt.Printf("Loaded %d repos from cache\n\n", len(cached))
-						for _, c := range cached {
-							repos = append(repos, ghclient.RepoInfo{Owner: c.Owner, Name: c.Name, Stars: c.Stars, Language: c.Language})
+				ctx := context.Background()
+
+				var repos []ghclient.RepoInfo
+				var err error
+				if list != "" {
+					repos, err = ghclient.LoadRepoList(list)
+					if err != nil {
+						return fmt.Errorf("loading repo list: %w", err)
+					}
+				} else if top > 0 {
+					cacheKey := fmt.Sprintf("top:%d", top)
+					if resume {
+						cached, _ := db.LoadRepoList(cacheKey)
+						if cached != nil {
+							fmt.Printf("Loaded %d repos from cache\n\n", len(cached))
+							for _, c := range cached {
+								repos = append(repos, ghclient.RepoInfo{Owner: c.Owner, Name: c.Name, Stars: c.Stars, Language: c.Language})
+							}
 						}
 					}
-				}
-				if len(repos) == 0 {
-					fmt.Printf("Fetching top %d repos by stars...\n", top)
-					repos, err = client.FetchTopRepos(ctx, top)
-					if err != nil {
-						return fmt.Errorf("fetching top repos: %w", err)
-					}
-					fmt.Printf("Found %d repos\n\n", len(repos))
+					if len(repos) == 0 {
+						fmt.Printf("Fetching top %d repos by stars...\n", top)
+						repos, err = client.FetchTopRepos(ctx, top)
+						if err != nil {
+							return fmt.Errorf("fetching top repos: %w", err)
+						}
+						fmt.Printf("Found %d repos\n\n", len(repos))
 
-					entries := make([]store.RepoListEntry, len(repos))
-					for i, r := range repos {
-						entries[i] = store.RepoListEntry{Owner: r.Owner, Name: r.Name, Stars: r.Stars, Language: r.Language}
+						entries := make([]store.RepoListEntry, len(repos))
+						for i, r := range repos {
+							entries[i] = store.RepoListEntry{Owner: r.Owner, Name: r.Name, Stars: r.Stars, Language: r.Language}
+						}
+						if saveErr := db.SaveRepoList(cacheKey, entries); saveErr != nil {
+							fmt.Fprintf(os.Stderr, "Warning: could not cache repo list: %v\n", saveErr)
+						}
 					}
-					if saveErr := db.SaveRepoList(cacheKey, entries); saveErr != nil {
-						fmt.Fprintf(os.Stderr, "Warning: could not cache repo list: %v\n", saveErr)
-					}
+				} else {
+					return fmt.Errorf("specify --top N or --list file")
 				}
-			} else {
-				return fmt.Errorf("specify --top N or --list file")
-			}
 
-			if useClone {
-				return batchScanWithClone(ctx, repos, cloneScanOptions{
-					DB:          db,
-					Tokens:      tokenList,
-					ScanOpts:    parseScanOpts(severities, rules),
+				if useClone {
+					return batchScanWithClone(ctx, repos, cloneScanOptions{
+						DB:          db,
+						Tokens:      tokenList,
+						ScanOpts:    parseScanOpts(severities, rules),
+						Resume:      resume,
+						Concurrency: concurrency,
+						KeepDir:     keepDir,
+					})
+				}
+
+				batchOpts := ghclient.BatchOptions{
+					Top:         top,
+					List:        list,
 					Resume:      resume,
+					Delay:       delay,
 					Concurrency: concurrency,
-					KeepDir:     keepDir,
-				})
-			}
+					DB:          db,
+					Opts:        parseScanOpts(severities, rules),
+				}
 
-			batchOpts := ghclient.BatchOptions{
-				Top:         top,
-				List:        list,
-				Resume:      resume,
-				Delay:       delay,
-				Concurrency: concurrency,
-				DB:          db,
-				Opts:        parseScanOpts(severities, rules),
-			}
+				if err := client.BatchScan(ctx, repos, batchOpts); err != nil {
+					return fmt.Errorf("batch scan: %w", err)
+				}
 
-			if err := client.BatchScan(ctx, repos, batchOpts); err != nil {
-				return fmt.Errorf("batch scan: %w", err)
-			}
+				// Auto-generate report if requested
+				if reportPath != "" {
+					return generateReport(db, reportPath)
+				}
 
-			// Auto-generate report if requested
-			if reportPath != "" {
-				return generateReport(db, reportPath)
-			}
-
-			return nil
+				return nil
+			})
 		},
 	}
 

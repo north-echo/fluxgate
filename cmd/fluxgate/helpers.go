@@ -11,6 +11,16 @@ import (
 	"github.com/north-echo/fluxgate/internal/store"
 )
 
+// withDB opens the store at path, runs fn, and closes the database.
+func withDB(path string, fn func(*store.DB) error) error {
+	db, err := store.Open(path)
+	if err != nil {
+		return fmt.Errorf("opening database: %w", err)
+	}
+	defer db.Close()
+	return fn(db)
+}
+
 // openOutput opens path for writing, or returns stdout when path is empty.
 // The returned close func is a no-op for stdout.
 func openOutput(path string) (io.Writer, func() error, error) {

@@ -28,18 +28,14 @@ func newDisclosureAddCmd() *cobra.Command {
 		Use:   "add",
 		Short: "File a new disclosure for a finding",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			db, err := store.Open(dbPath)
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-
-			disc, err := db.AddDisclosure(findingID, channel, disclosureID)
-			if err != nil {
-				return fmt.Errorf("adding disclosure: %w", err)
-			}
-			fmt.Printf("Disclosure #%d created (channel: %s, status: %s)\n", disc.ID, disc.Channel, disc.Status)
-			return nil
+			return withDB(dbPath, func(db *store.DB) error {
+				disc, err := db.AddDisclosure(findingID, channel, disclosureID)
+				if err != nil {
+					return fmt.Errorf("adding disclosure: %w", err)
+				}
+				fmt.Printf("Disclosure #%d created (channel: %s, status: %s)\n", disc.ID, disc.Channel, disc.Status)
+				return nil
+			})
 		},
 	}
 	cmd.Flags().Int64Var(&findingID, "finding-id", 0, "Finding ID to disclose")
@@ -59,31 +55,27 @@ func newDisclosureListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List disclosures",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			db, err := store.Open(dbPath)
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-
-			disclosures, err := db.ListDisclosures(status, findingID)
-			if err != nil {
-				return err
-			}
-			if len(disclosures) == 0 {
-				fmt.Println("No disclosures found.")
-				return nil
-			}
-			fmt.Printf("%-4s %-10s %-30s %-8s %-12s %-12s %s\n",
-				"ID", "Channel", "Repo", "Rule", "Status", "Filed", "Disclosure ID")
-			for _, d := range disclosures {
-				filed := d.FiledAt.String
-				if len(filed) > 10 {
-					filed = filed[:10]
+			return withDB(dbPath, func(db *store.DB) error {
+				disclosures, err := db.ListDisclosures(status, findingID)
+				if err != nil {
+					return err
 				}
-				fmt.Printf("%-4d %-10s %-30s %-8s %-12s %-12s %s\n",
-					d.ID, d.Channel, d.Owner+"/"+d.RepoName, d.RuleID, d.Status, filed, d.DisclosureID.String)
-			}
-			return nil
+				if len(disclosures) == 0 {
+					fmt.Println("No disclosures found.")
+					return nil
+				}
+				fmt.Printf("%-4s %-10s %-30s %-8s %-12s %-12s %s\n",
+					"ID", "Channel", "Repo", "Rule", "Status", "Filed", "Disclosure ID")
+				for _, d := range disclosures {
+					filed := d.FiledAt.String
+					if len(filed) > 10 {
+						filed = filed[:10]
+					}
+					fmt.Printf("%-4d %-10s %-30s %-8s %-12s %-12s %s\n",
+						d.ID, d.Channel, d.Owner+"/"+d.RepoName, d.RuleID, d.Status, filed, d.DisclosureID.String)
+				}
+				return nil
+			})
 		},
 	}
 	cmd.Flags().StringVar(&status, "status", "", "Filter by status (filed/acknowledged/patched/wontfix/timeout)")
@@ -109,33 +101,29 @@ func newDisclosureUpdateCmd() *cobra.Command {
 					return fmt.Errorf("invalid status %q (must be filed/acknowledged/patched/wontfix/timeout)", status)
 				}
 			}
-			db, err := store.Open(dbPath)
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-
-			updates := []string{}
-			if status != "" {
-				if err := db.UpdateDisclosureStatus(id, status); err != nil {
-					return err
+			return withDB(dbPath, func(db *store.DB) error {
+				updates := []string{}
+				if status != "" {
+					if err := db.UpdateDisclosureStatus(id, status); err != nil {
+						return err
+					}
+					updates = append(updates, "status="+status)
 				}
-				updates = append(updates, "status="+status)
-			}
-			if disclosureID != "" {
-				if err := db.UpdateDisclosureID(id, disclosureID); err != nil {
-					return err
+				if disclosureID != "" {
+					if err := db.UpdateDisclosureID(id, disclosureID); err != nil {
+						return err
+					}
+					updates = append(updates, "disclosure-id="+disclosureID)
 				}
-				updates = append(updates, "disclosure-id="+disclosureID)
-			}
-			if notes != "" {
-				if err := db.UpdateDisclosureNotes(id, notes); err != nil {
-					return err
+				if notes != "" {
+					if err := db.UpdateDisclosureNotes(id, notes); err != nil {
+						return err
+					}
+					updates = append(updates, "notes updated")
 				}
-				updates = append(updates, "notes updated")
-			}
-			fmt.Printf("Disclosure #%d updated: %s\n", id, strings.Join(updates, ", "))
-			return nil
+				fmt.Printf("Disclosure #%d updated: %s\n", id, strings.Join(updates, ", "))
+				return nil
+			})
 		},
 	}
 	cmd.Flags().Int64Var(&id, "id", 0, "Disclosure ID")
@@ -155,18 +143,14 @@ func newDisclosurePatchCmd() *cobra.Command {
 		Use:   "patch",
 		Short: "Record a patch for a disclosure",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			db, err := store.Open(dbPath)
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-
-			p, err := db.AddPatch(disclosureID, commitURL, releaseTag)
-			if err != nil {
-				return err
-			}
-			fmt.Printf("Patch #%d recorded for disclosure #%d\n", p.ID, disclosureID)
-			return nil
+			return withDB(dbPath, func(db *store.DB) error {
+				p, err := db.AddPatch(disclosureID, commitURL, releaseTag)
+				if err != nil {
+					return err
+				}
+				fmt.Printf("Patch #%d recorded for disclosure #%d\n", p.ID, disclosureID)
+				return nil
+			})
 		},
 	}
 	cmd.Flags().Int64Var(&disclosureID, "disclosure-id", 0, "Disclosure ID")

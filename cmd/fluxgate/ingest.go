@@ -35,85 +35,81 @@ Each line must be a JSON object: {"repo": "owner/repo", "path": ".github/workflo
 Results are stored in SQLite for analysis.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			db, err := store.Open(dbPath)
-			if err != nil {
-				return fmt.Errorf("opening database: %w", err)
-			}
-			defer db.Close()
-
-			f, err := os.Open(args[0])
-			if err != nil {
-				return fmt.Errorf("opening input: %w", err)
-			}
-			defer f.Close()
-
-			opts := parseScanOpts(severities, rules)
-			sc := bufio.NewScanner(f)
-			sc.Buffer(make([]byte, 0), 10*1024*1024) // 10MB max line
-
-			var total, scanned, withFindings, errors int
-			// Track workflows per repo for batch saving
-			repoWorkflows := make(map[string][]ingestRecord)
-
-			for sc.Scan() {
-				total++
-				var rec ingestRecord
-				if err := json.Unmarshal(sc.Bytes(), &rec); err != nil {
-					errors++
-					continue
+			return withDB(dbPath, func(db *store.DB) error {
+				f, err := os.Open(args[0])
+				if err != nil {
+					return fmt.Errorf("opening input: %w", err)
 				}
-				if rec.Repo == "" || rec.Content == "" {
-					errors++
-					continue
-				}
-				repoWorkflows[rec.Repo] = append(repoWorkflows[rec.Repo], rec)
-			}
-			if err := sc.Err(); err != nil {
-				return fmt.Errorf("reading input: %w", err)
-			}
+				defer f.Close()
 
-			fmt.Printf("Loaded %d workflows from %d repos (%d errors)\n", total, len(repoWorkflows), errors)
+				opts := parseScanOpts(severities, rules)
+				sc := bufio.NewScanner(f)
+				sc.Buffer(make([]byte, 0), 10*1024*1024) // 10MB max line
 
-			for repo, records := range repoWorkflows {
-				parts := strings.SplitN(repo, "/", 2)
-				if len(parts) != 2 {
-					errors++
-					continue
-				}
-				owner, name := parts[0], parts[1]
+				var total, scanned, withFindings, errors int
+				// Track workflows per repo for batch saving
+				repoWorkflows := make(map[string][]ingestRecord)
 
-				result := &scanner.ScanResult{
-					Path:      repo,
-					Workflows: len(records),
-				}
-
-				for _, rec := range records {
-					findings, err := scanner.ScanWorkflowBytes([]byte(rec.Content), rec.Path, opts)
-					if err != nil {
+				for sc.Scan() {
+					total++
+					var rec ingestRecord
+					if err := json.Unmarshal(sc.Bytes(), &rec); err != nil {
+						errors++
 						continue
 					}
-					result.Findings = append(result.Findings, findings...)
+					if rec.Repo == "" || rec.Content == "" {
+						errors++
+						continue
+					}
+					repoWorkflows[rec.Repo] = append(repoWorkflows[rec.Repo], rec)
+				}
+				if err := sc.Err(); err != nil {
+					return fmt.Errorf("reading input: %w", err)
 				}
 
-				scanned++
-				if len(result.Findings) > 0 {
-					withFindings++
+				fmt.Printf("Loaded %d workflows from %d repos (%d errors)\n", total, len(repoWorkflows), errors)
+
+				for repo, records := range repoWorkflows {
+					parts := strings.SplitN(repo, "/", 2)
+					if len(parts) != 2 {
+						errors++
+						continue
+					}
+					owner, name := parts[0], parts[1]
+
+					result := &scanner.ScanResult{
+						Path:      repo,
+						Workflows: len(records),
+					}
+
+					for _, rec := range records {
+						findings, err := scanner.ScanWorkflowBytes([]byte(rec.Content), rec.Path, opts)
+						if err != nil {
+							continue
+						}
+						result.Findings = append(result.Findings, findings...)
+					}
+
+					scanned++
+					if len(result.Findings) > 0 {
+						withFindings++
+					}
+
+					if err := db.SaveResultWithSource(owner, name, 0, "", result, source); err != nil {
+						fmt.Fprintf(os.Stderr, "Error saving %s: %v\n", repo, err)
+						errors++
+					}
+
+					if scanned%1000 == 0 {
+						fmt.Printf("  Processed %d/%d repos...\n", scanned, len(repoWorkflows))
+					}
 				}
 
-				if err := db.SaveResultWithSource(owner, name, 0, "", result, source); err != nil {
-					fmt.Fprintf(os.Stderr, "Error saving %s: %v\n", repo, err)
-					errors++
-				}
+				fmt.Printf("\nIngest complete: %d repos scanned, %d with findings, %d errors\n",
+					scanned, withFindings, errors)
 
-				if scanned%1000 == 0 {
-					fmt.Printf("  Processed %d/%d repos...\n", scanned, len(repoWorkflows))
-				}
-			}
-
-			fmt.Printf("\nIngest complete: %d repos scanned, %d with findings, %d errors\n",
-				scanned, withFindings, errors)
-
-			return nil
+				return nil
+			})
 		},
 	}
 
