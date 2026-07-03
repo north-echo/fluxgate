@@ -417,12 +417,22 @@ func CorrelatePwnRequestInjection(findings []Finding) []Finding {
 }
 
 func sortFindings(findings []Finding) {
+	// Total order: rules iterate a map, so anything the comparator leaves
+	// tied comes out in random order and scan output differs run to run.
 	sort.Slice(findings, func(i, j int) bool {
-		ri := SeverityRank(findings[i].Severity)
-		rj := SeverityRank(findings[j].Severity)
-		if ri != rj {
+		fi, fj := findings[i], findings[j]
+		if ri, rj := SeverityRank(fi.Severity), SeverityRank(fj.Severity); ri != rj {
 			return ri < rj
 		}
-		return findings[i].File < findings[j].File
+		if fi.File != fj.File {
+			return fi.File < fj.File
+		}
+		if fi.Line != fj.Line {
+			return fi.Line < fj.Line
+		}
+		if fi.RuleID != fj.RuleID {
+			return fi.RuleID < fj.RuleID
+		}
+		return fi.Message < fj.Message
 	})
 }

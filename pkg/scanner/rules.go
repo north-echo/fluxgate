@@ -3,6 +3,7 @@ package scanner
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -2087,17 +2088,28 @@ func describePermissions(wfPerms, jobPerms PermissionsConfig) string {
 		return "default (potentially write-all)"
 	}
 
+	// Sorted scope order keeps the details string deterministic run to run.
 	var parts []string
-	for k, v := range wfPerms.Scopes {
-		parts = append(parts, fmt.Sprintf("%s:%s", k, v))
+	for _, k := range sortedKeys(wfPerms.Scopes) {
+		parts = append(parts, k+":"+wfPerms.Scopes[k])
 	}
-	for k, v := range jobPerms.Scopes {
-		parts = append(parts, fmt.Sprintf("job(%s:%s)", k, v))
+	for _, k := range sortedKeys(jobPerms.Scopes) {
+		parts = append(parts, "job("+k+":"+jobPerms.Scopes[k]+")")
 	}
 	if len(parts) == 0 {
 		return "restricted"
 	}
 	return strings.Join(parts, ", ")
+}
+
+// sortedKeys returns the map's keys in sorted order.
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 var ifExprPattern = regexp.MustCompile(`\$\{\{.*?\}\}`)
