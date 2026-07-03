@@ -63,12 +63,10 @@ func SparseClone(ctx context.Context, owner, repo, destDir, askPass, token strin
 		return fmt.Errorf("git clone %s/%s: %w", owner, repo, err)
 	}
 
-	// Non-cone mode excludes root-level files; cone mode always includes them.
-	if err := runGit(ctx, destDir, "sparse-checkout", "init", "--no-cone"); err != nil {
-		return fmt.Errorf("git sparse-checkout init for %s/%s: %w", owner, repo, err)
-	}
-
-	if err := runGit(ctx, destDir, "sparse-checkout", "set", "/.github/"); err != nil {
+	// Non-cone mode excludes root-level files; cone mode always includes
+	// them. `set --no-cone` (git >= 2.35) initializes and sets the pattern
+	// in one subprocess instead of separate init + set calls.
+	if err := runGit(ctx, destDir, "sparse-checkout", "set", "--no-cone", "/.github/"); err != nil {
 		return fmt.Errorf("git sparse-checkout set for %s/%s: %w", owner, repo, err)
 	}
 
@@ -150,57 +148,64 @@ func CloneAndScan(ctx context.Context, repos []Repo, concurrency int, tokens []s
 	}
 
 	results := make([]CloneResult, len(repos))
-	sem := make(chan struct{}, concurrency)
+	idxCh := make(chan int)
 	var wg sync.WaitGroup
 
-	for i := range repos {
+	// Fixed worker pool: spawning one goroutine per repo up front allocates
+	// N goroutines for a batch of N even though only `concurrency` run.
+	for w := 0; w < concurrency; w++ {
 		wg.Add(1)
-		go func(idx int) {
+		go func() {
 			defer wg.Done()
-
-			sem <- struct{}{}
-			defer func() { <-sem }()
-
-			owner, name := repos[idx].Owner, repos[idx].Name
-			results[idx] = CloneResult{Owner: owner, Name: name}
-
-			select {
-			case <-ctx.Done():
-				results[idx].Err = ctx.Err()
-				return
-			default:
+			for idx := range idxCh {
+				cloneOne(ctx, repos[idx], &results[idx], tokens, askPass, keepDir, idx, scanFn)
 			}
-
-			var repoDir string
-			if keepDir != "" {
-				repoDir = filepath.Join(keepDir, owner, name)
-				if err := os.MkdirAll(filepath.Dir(repoDir), 0o750); err != nil {
-					results[idx].Err = err
-					return
-				}
-			} else {
-				tmpDir, err := os.MkdirTemp("", "fluxgate-*")
-				if err != nil {
-					results[idx].Err = err
-					return
-				}
-				repoDir = filepath.Join(tmpDir, owner, name)
-				defer os.RemoveAll(tmpDir)
-			}
-
-			token := ""
-			if len(tokens) > 0 {
-				token = tokens[idx%len(tokens)]
-			}
-			if err := SparseClone(ctx, owner, name, repoDir, askPass, token); err != nil {
-				results[idx].Err = err
-				return
-			}
-
-			results[idx].Err = scanFn(owner, name, repoDir, &results[idx])
-		}(i)
+		}()
 	}
 
+	for i := range repos {
+		idxCh <- i
+	}
+	close(idxCh)
 	wg.Wait()
 	return results
+}
+
+// cloneOne clones and scans a single repo within a CloneAndScan worker.
+func cloneOne(ctx context.Context, repo Repo, result *CloneResult, tokens []string, askPass, keepDir string, idx int, scanFn ScanFunc) {
+	owner, name := repo.Owner, repo.Name
+	*result = CloneResult{Owner: owner, Name: name}
+
+	if ctx.Err() != nil {
+		result.Err = ctx.Err()
+		return
+	}
+
+	var repoDir string
+	if keepDir != "" {
+		repoDir = filepath.Join(keepDir, owner, name)
+		if err := os.MkdirAll(filepath.Dir(repoDir), 0o750); err != nil {
+			result.Err = err
+			return
+		}
+	} else {
+		tmpDir, err := os.MkdirTemp("", "fluxgate-*")
+		if err != nil {
+			result.Err = err
+			return
+		}
+		repoDir = filepath.Join(tmpDir, owner, name)
+		defer os.RemoveAll(tmpDir)
+	}
+
+	token := ""
+	if len(tokens) > 0 {
+		token = tokens[idx%len(tokens)]
+	}
+	if err := SparseClone(ctx, owner, name, repoDir, askPass, token); err != nil {
+		result.Err = err
+		return
+	}
+
+	result.Err = scanFn(owner, name, repoDir, result)
 }
