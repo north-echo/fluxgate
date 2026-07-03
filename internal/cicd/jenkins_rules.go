@@ -5,15 +5,9 @@ import (
 	"strings"
 )
 
-// JenkinsFinding represents a security finding in a Jenkins pipeline.
-type JenkinsFinding struct {
-	RuleID   string
-	Severity string
-	File     string
-	Line     int
-	Message  string
-	Details  string
-}
+// JenkinsFinding is an alias of the shared PlatformFinding type.
+type JenkinsFinding = PlatformFinding
+
 
 // ScanJenkinsPipeline runs all Jenkins security rules against a parsed pipeline.
 func ScanJenkinsPipeline(pipeline *JenkinsPipeline) []JenkinsFinding {
@@ -76,30 +70,9 @@ func checkJenkinsScriptInjection(pipeline *JenkinsPipeline) []JenkinsFinding {
 		"CHANGE_AUTHOR",
 	}
 
-	var findings []JenkinsFinding
-	for _, job := range pipeline.Jobs() {
-		for _, step := range job.Steps {
-			if step.Type != StepScript {
-				continue
-			}
-			for _, dv := range dangerousVars {
-				if strings.Contains(step.Command, dv) {
-					findings = append(findings, JenkinsFinding{
-						RuleID:   "JK-002",
-						Severity: severityHigh,
-						File:     pipeline.FilePath(),
-						Line:     step.Line,
-						Message: fmt.Sprintf(
-							"Jenkins Script Injection: %s used in shell block of stage '%s'",
-							dv, job.Name),
-						Details: "User-controllable Jenkins change variables in shell blocks can be exploited for command injection via crafted branch names, PR titles, or author names.",
-					})
-					break
-				}
-			}
-		}
-	}
-	return findings
+	return scanScriptInjection(pipeline, dangerousVars, "JK-002",
+		"Jenkins Script Injection: %s used in shell block of stage '%s'",
+		"User-controllable Jenkins change variables in shell blocks can be exploited for command injection via crafted branch names, PR titles, or author names.")
 }
 
 // checkJenkinsUnpinnedLibrary detects @Library annotations without a version

@@ -5,15 +5,9 @@ import (
 	"strings"
 )
 
-// TektonFinding represents a security finding in a Tekton pipeline.
-type TektonFinding struct {
-	RuleID   string
-	Severity string
-	File     string
-	Line     int
-	Message  string
-	Details  string
-}
+// TektonFinding is an alias of the shared PlatformFinding type.
+type TektonFinding = PlatformFinding
+
 
 // ScanTektonPipeline runs all Tekton security rules against a parsed pipeline.
 func ScanTektonPipeline(pipeline *TektonPipeline) []TektonFinding {

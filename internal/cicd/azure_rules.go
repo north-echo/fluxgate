@@ -5,15 +5,9 @@ import (
 	"strings"
 )
 
-// AzureFinding represents a security finding in an Azure Pipeline.
-type AzureFinding struct {
-	RuleID   string
-	Severity string
-	File     string
-	Line     int
-	Message  string
-	Details  string
-}
+// AzureFinding is an alias of the shared PlatformFinding type.
+type AzureFinding = PlatformFinding
+
 
 // ScanAzurePipeline runs all Azure Pipelines security rules.
 func ScanAzurePipeline(pipeline *AzurePipeline) []AzureFinding {
@@ -113,41 +107,11 @@ func checkAzureScriptInjection(pipeline *AzurePipeline) []AzureFinding {
 		"$(Build.RequestedForEmail)",
 	}
 
-	var findings []AzureFinding
-	for _, job := range pipeline.Jobs() {
-		for _, step := range job.Steps {
-			if step.Type != StepScript {
-				continue
-			}
-			for _, dv := range dangerousVars {
-				if strings.Contains(step.Command, dv) {
-					findings = append(findings, AzureFinding{
-						RuleID:   "AZ-002",
-						Severity: severityHigh,
-						File:     pipeline.FilePath(),
-						Line:     step.Line,
-						Message: fmt.Sprintf(
-							"Azure Script Injection: %s used in script of job '%s'",
-							dv, job.Name),
-						Details: "User-controllable predefined variables in script blocks can be exploited for command injection via crafted branch names or commit messages. Use environment variables or task inputs instead of inline variable expansion.",
-					})
-					break
-				}
-			}
-
-			// Also check env mappings for dangerous variable references
-			for envKey, envVal := range step.Env {
-				for _, dv := range dangerousVars {
-					if strings.Contains(envVal, dv) {
-						// Using env var mapping is actually the SAFE pattern — skip
-						_ = envKey
-						break
-					}
-				}
-			}
-		}
-	}
-	return findings
+	// Env-var mappings of these variables are the safe pattern and are
+	// intentionally not flagged.
+	return scanScriptInjection(pipeline, dangerousVars, "AZ-002",
+		"Azure Script Injection: %s used in script of job '%s'",
+		"User-controllable predefined variables in script blocks can be exploited for command injection via crafted branch names or commit messages. Use environment variables or task inputs instead of inline variable expansion.")
 }
 
 // checkAzureUnpinnedTemplates detects template references without version

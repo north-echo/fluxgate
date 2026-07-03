@@ -125,6 +125,10 @@ jobs:
     steps:
       - script: echo "Branch $(Build.SourceBranchName)"
         displayName: Echo branch
+  - job: Deploy
+    steps:
+      - script: git checkout $(Build.SourceBranchName)
+        displayName: Unquoted interpolation
 `
 	p, err := ParseAzurePipeline([]byte(yaml), "azure-pipelines.yml")
 	if err != nil {
@@ -138,11 +142,21 @@ jobs:
 			az002 = append(az002, f)
 		}
 	}
-	if len(az002) == 0 {
-		t.Fatal("expected AZ-002 finding for script injection")
+	if len(az002) != 2 {
+		t.Fatalf("expected 2 AZ-002 findings, got %d", len(az002))
 	}
-	if az002[0].Severity != severityHigh {
-		t.Errorf("expected severity high, got %s", az002[0].Severity)
+	// Echo-only usage is downgraded to info; unquoted use in a command is high.
+	var sawInfo, sawHigh bool
+	for _, f := range az002 {
+		switch f.Severity {
+		case severityInfo:
+			sawInfo = true
+		case severityHigh:
+			sawHigh = true
+		}
+	}
+	if !sawInfo || !sawHigh {
+		t.Errorf("expected one info (echo-only) and one high (unquoted) finding, got %+v", az002)
 	}
 }
 

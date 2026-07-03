@@ -81,13 +81,21 @@ func TestJenkinsScriptInjection(t *testing.T) {
 		}
 	}
 
-	if len(jk002) == 0 {
-		t.Fatal("expected at least 1 JK-002 finding for env.CHANGE_BRANCH in sh block")
+	if len(jk002) != 2 {
+		t.Fatalf("expected 2 JK-002 findings, got %d", len(jk002))
 	}
+	// Echo-only usage is downgraded to info; unquoted use in a command is high.
+	var sawInfo, sawHigh bool
 	for _, f := range jk002 {
-		if f.Severity != severityHigh {
-			t.Errorf("expected high severity, got %s", f.Severity)
+		switch f.Severity {
+		case severityInfo:
+			sawInfo = true
+		case severityHigh:
+			sawHigh = true
 		}
+	}
+	if !sawInfo || !sawHigh {
+		t.Errorf("expected one info (echo-only) and one high (unquoted) finding, got %+v", jk002)
 	}
 }
 

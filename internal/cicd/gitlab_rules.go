@@ -5,15 +5,8 @@ import (
 	"strings"
 )
 
-// GitLabFinding represents a security finding in a GitLab CI pipeline.
-type GitLabFinding struct {
-	RuleID   string
-	Severity string
-	File     string
-	Line     int
-	Message  string
-	Details  string
-}
+// GitLabFinding is an alias of the shared PlatformFinding type.
+type GitLabFinding = PlatformFinding
 
 // Severity constants (matching scanner package).
 const (
@@ -144,43 +137,9 @@ func checkGitLabScriptInjection(pipeline *GitLabPipeline) []GitLabFinding {
 		"${CI_COMMIT_MESSAGE}",
 	}
 
-	var findings []GitLabFinding
-	for _, job := range pipeline.Jobs() {
-		for _, step := range job.Steps {
-			if step.Type != StepScript {
-				continue
-			}
-			for _, dv := range dangerousVars {
-				if strings.Contains(step.Command, dv) {
-					severity := severityHigh
-					details := "User-controllable CI variables in script blocks can be exploited for command injection via crafted branch names, commit messages, or MR titles."
-
-					// Downgrade: echo/printf is logging, not exploitable injection
-					if isLoggingOnlyUsage(step.Command, dv) {
-						severity = severityInfo
-						details = "Variable used in echo/printf for logging. Not directly exploitable but may leak sensitive metadata to build logs."
-					} else if isQuotedArgUsage(step.Command, dv) {
-						// Quoted CLI argument — harder to exploit than unquoted interpolation
-						severity = severityMedium
-						details = "Variable used as a quoted CLI argument. Exploitation requires breaking out of the quoted context, which is significantly harder than unquoted shell interpolation."
-					}
-
-					findings = append(findings, GitLabFinding{
-						RuleID:   "GL-002",
-						Severity: severity,
-						File:     pipeline.FilePath(),
-						Line:     step.Line,
-						Message: fmt.Sprintf(
-							"GitLab Script Injection: %s used in script block of job '%s'",
-							dv, job.Name),
-						Details: details,
-					})
-					break
-				}
-			}
-		}
-	}
-	return findings
+	return scanScriptInjection(pipeline, dangerousVars, "GL-002",
+		"GitLab Script Injection: %s used in script block of job '%s'",
+		"User-controllable CI variables in script blocks can be exploited for command injection via crafted branch names, commit messages, or MR titles.")
 }
 
 // isLoggingOnlyUsage checks if a variable is only used in echo/printf statements.

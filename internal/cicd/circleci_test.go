@@ -78,13 +78,21 @@ func TestCircleCIScriptInjection(t *testing.T) {
 		}
 	}
 
-	if len(cc002) == 0 {
-		t.Fatal("expected at least 1 CC-002 finding for $CIRCLE_BRANCH in run command")
+	if len(cc002) != 2 {
+		t.Fatalf("expected 2 CC-002 findings, got %d", len(cc002))
 	}
+	// Echo-only usage is downgraded to info; unquoted use in a command is high.
+	var sawInfo, sawHigh bool
 	for _, f := range cc002 {
-		if f.Severity != severityHigh {
-			t.Errorf("expected high severity, got %s", f.Severity)
+		switch f.Severity {
+		case severityInfo:
+			sawInfo = true
+		case severityHigh:
+			sawHigh = true
 		}
+	}
+	if !sawInfo || !sawHigh {
+		t.Errorf("expected one info (echo-only) and one high (unquoted) finding, got %+v", cc002)
 	}
 }
 

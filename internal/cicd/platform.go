@@ -32,6 +32,18 @@ const (
 	TriggerAPI TriggerType = "api"
 )
 
+// PlatformFinding is a security finding from any non-GitHub platform rule
+// set. The per-platform names (GitLabFinding, AzureFinding, ...) are aliases
+// of this type; pkg/scanner converts it to the common Finding once.
+type PlatformFinding struct {
+	RuleID   string
+	Severity string
+	File     string
+	Line     int
+	Message  string
+	Details  string
+}
+
 // Pipeline is the platform-agnostic representation of a CI/CD pipeline config.
 type Pipeline interface {
 	// Platform returns the CI/CD platform name (e.g., "github", "gitlab").

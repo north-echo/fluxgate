@@ -8,7 +8,7 @@ pipeline {
             }
             steps {
                 sh "echo Building branch ${env.CHANGE_BRANCH}"
-                sh "echo PR title: ${env.CHANGE_TITLE}"
+                sh "git checkout ${env.CHANGE_BRANCH}"
             }
         }
     }

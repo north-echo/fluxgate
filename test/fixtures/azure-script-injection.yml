@@ -14,3 +14,9 @@ jobs:
           echo "Building branch $(Build.SourceBranchName)"
           echo "Requested by $(Build.RequestedFor)"
         displayName: Echo branch info
+  - job: Deploy
+    steps:
+      - script: |
+          git checkout $(Build.SourceBranchName)
+          ./scripts/notify.sh $(Build.RequestedFor)
+        displayName: Unquoted interpolation into commands

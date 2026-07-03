@@ -213,53 +213,7 @@ func ScanGitLabCI(data []byte, path string, opts ScanOptions) []Finding {
 		return nil
 	}
 
-	glFindings := cicd.ScanGitLabPipeline(pipeline)
-
-	// Convert GitLab findings to common Finding type
-	var findings []Finding
-	for _, glf := range glFindings {
-		f := Finding{
-			RuleID:   glf.RuleID,
-			Severity: glf.Severity,
-			File:     glf.File,
-			Line:     glf.Line,
-			Message:  glf.Message,
-			Details:  glf.Details,
-		}
-		findings = append(findings, f)
-	}
-
-	// Apply severity filter
-	if len(opts.Severities) > 0 {
-		sevSet := make(map[string]bool)
-		for _, s := range opts.Severities {
-			sevSet[strings.ToLower(s)] = true
-		}
-		var filtered []Finding
-		for _, f := range findings {
-			if sevSet[f.Severity] {
-				filtered = append(filtered, f)
-			}
-		}
-		findings = filtered
-	}
-
-	// Apply rule filter
-	if len(opts.Rules) > 0 {
-		ruleSet := make(map[string]bool)
-		for _, r := range opts.Rules {
-			ruleSet[r] = true
-		}
-		var filtered []Finding
-		for _, f := range findings {
-			if ruleSet[f.RuleID] {
-				filtered = append(filtered, f)
-			}
-		}
-		findings = filtered
-	}
-
-	return findings
+	return filterFindings(platformFindings(cicd.ScanGitLabPipeline(pipeline)), opts)
 }
 
 // ScanAzurePipelines parses and scans an azure-pipelines.yml file, returning
@@ -273,52 +227,7 @@ func ScanAzurePipelines(data []byte, path string, opts ScanOptions) []Finding {
 		return nil
 	}
 
-	azFindings := cicd.ScanAzurePipeline(pipeline)
-
-	var findings []Finding
-	for _, azf := range azFindings {
-		f := Finding{
-			RuleID:   azf.RuleID,
-			Severity: azf.Severity,
-			File:     azf.File,
-			Line:     azf.Line,
-			Message:  azf.Message,
-			Details:  azf.Details,
-		}
-		findings = append(findings, f)
-	}
-
-	// Apply severity filter
-	if len(opts.Severities) > 0 {
-		sevSet := make(map[string]bool)
-		for _, s := range opts.Severities {
-			sevSet[strings.ToLower(s)] = true
-		}
-		var filtered []Finding
-		for _, f := range findings {
-			if sevSet[f.Severity] {
-				filtered = append(filtered, f)
-			}
-		}
-		findings = filtered
-	}
-
-	// Apply rule filter
-	if len(opts.Rules) > 0 {
-		ruleSet := make(map[string]bool)
-		for _, r := range opts.Rules {
-			ruleSet[r] = true
-		}
-		var filtered []Finding
-		for _, f := range findings {
-			if ruleSet[f.RuleID] {
-				filtered = append(filtered, f)
-			}
-		}
-		findings = filtered
-	}
-
-	return findings
+	return filterFindings(platformFindings(cicd.ScanAzurePipeline(pipeline)), opts)
 }
 
 // ScanJenkinsfile parses and scans a Jenkinsfile.
@@ -330,15 +239,7 @@ func ScanJenkinsfile(data []byte, path string, opts ScanOptions) []Finding {
 	if err != nil {
 		return nil
 	}
-	jkFindings := cicd.ScanJenkinsPipeline(pipeline)
-	var findings []Finding
-	for _, f := range jkFindings {
-		findings = append(findings, Finding{
-			RuleID: f.RuleID, Severity: f.Severity, File: f.File,
-			Line: f.Line, Message: f.Message, Details: f.Details,
-		})
-	}
-	return filterFindings(findings, opts)
+	return filterFindings(platformFindings(cicd.ScanJenkinsPipeline(pipeline)), opts)
 }
 
 // ScanTektonPipeline parses and scans a Tekton Pipeline/Task YAML.
@@ -350,15 +251,7 @@ func ScanTektonPipeline(data []byte, path string, opts ScanOptions) []Finding {
 	if err != nil {
 		return nil
 	}
-	tkFindings := cicd.ScanTektonPipeline(pipeline)
-	var findings []Finding
-	for _, f := range tkFindings {
-		findings = append(findings, Finding{
-			RuleID: f.RuleID, Severity: f.Severity, File: f.File,
-			Line: f.Line, Message: f.Message, Details: f.Details,
-		})
-	}
-	return filterFindings(findings, opts)
+	return filterFindings(platformFindings(cicd.ScanTektonPipeline(pipeline)), opts)
 }
 
 // ScanCircleCI parses and scans a .circleci/config.yml.
@@ -370,15 +263,24 @@ func ScanCircleCI(data []byte, path string, opts ScanOptions) []Finding {
 	if err != nil {
 		return nil
 	}
-	ccFindings := cicd.ScanCircleCIPipeline(pipeline)
+	return filterFindings(platformFindings(cicd.ScanCircleCIPipeline(pipeline)), opts)
+}
+
+// platformFindings converts findings from the internal/cicd platform rule
+// sets into the common Finding type.
+func platformFindings(pfs []cicd.PlatformFinding) []Finding {
 	var findings []Finding
-	for _, f := range ccFindings {
+	for _, pf := range pfs {
 		findings = append(findings, Finding{
-			RuleID: f.RuleID, Severity: f.Severity, File: f.File,
-			Line: f.Line, Message: f.Message, Details: f.Details,
+			RuleID:   pf.RuleID,
+			Severity: pf.Severity,
+			File:     pf.File,
+			Line:     pf.Line,
+			Message:  pf.Message,
+			Details:  pf.Details,
 		})
 	}
-	return filterFindings(findings, opts)
+	return findings
 }
 
 // filterFindings applies severity and rule filters to a finding list.
