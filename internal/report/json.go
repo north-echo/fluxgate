@@ -18,7 +18,7 @@ type jsonReport struct {
 // WriteJSON writes findings as JSON.
 func WriteJSON(w io.Writer, result *scanner.ScanResult) error {
 	report := jsonReport{
-		Version:   "0.1.0",
+		Version:   scanner.Version,
 		Path:      result.Path,
 		Workflows: result.Workflows,
 		Total:     len(result.Findings),

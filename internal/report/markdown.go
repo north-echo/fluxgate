@@ -3,6 +3,7 @@ package report
 import (
 	"fmt"
 	"io"
+	"sort"
 	"time"
 
 	"github.com/north-echo/fluxgate/internal/scanner"
@@ -47,7 +48,12 @@ func WriteMarkdown(w io.Writer, stats *store.ReportStats, criticals []store.Crit
 	fmt.Fprintln(w, "### Findings by Rule")
 	fmt.Fprintln(w, "| Rule | Description | Count |")
 	fmt.Fprintln(w, "|------|-------------|-------|")
-	for _, ruleID := range []string{"FG-001", "FG-002", "FG-003", "FG-004", "FG-005"} {
+	ruleIDs := make([]string, 0, len(stats.ByRule))
+	for ruleID := range stats.ByRule {
+		ruleIDs = append(ruleIDs, ruleID)
+	}
+	sort.Strings(ruleIDs)
+	for _, ruleID := range ruleIDs {
 		count := stats.ByRule[ruleID]
 		if count == 0 {
 			continue

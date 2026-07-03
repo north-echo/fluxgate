@@ -117,7 +117,7 @@ func WriteSARIF(w io.Writer, result *scanner.ScanResult) error {
 			Tool: sarifTool{
 				Driver: sarifDriver{
 					Name:           "fluxgate",
-					Version:        "0.1.0",
+					Version:        scanner.Version,
 					InformationURI: "https://github.com/north-echo/fluxgate",
 					Rules:          rules,
 				},
