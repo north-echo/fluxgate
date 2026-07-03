@@ -43,9 +43,10 @@ func runGit(ctx context.Context, dir string, args ...string) error {
 // SparseClone clones a GitHub repository using sparse checkout, fetching only
 // the .github/ directory.
 //
-// If token is non-empty, it is injected via GIT_ASKPASS to avoid exposing
-// credentials in process argument lists.
-func SparseClone(ctx context.Context, owner, repo, destDir, token string) error {
+// If token is non-empty, it is injected via GIT_ASKPASS (askPass must be a
+// path from writeAskPass) to avoid exposing credentials in process argument
+// lists.
+func SparseClone(ctx context.Context, owner, repo, destDir, askPass, token string) error {
 	repoURL := fmt.Sprintf("https://github.com/%s/%s.git", owner, repo)
 
 	cloneCmd := exec.CommandContext(ctx, "git", "clone",
@@ -55,8 +56,8 @@ func SparseClone(ctx context.Context, owner, repo, destDir, token string) error 
 		repoURL,
 		destDir,
 	)
-	if token != "" {
-		cloneCmd.Env = append(os.Environ(), tokenAskPassEnv(token)...)
+	if token != "" && askPass != "" {
+		cloneCmd.Env = append(os.Environ(), tokenAskPassEnv(askPass, token)...)
 	}
 	if err := cloneCmd.Run(); err != nil {
 		return fmt.Errorf("git clone %s/%s: %w", owner, repo, err)
@@ -78,13 +79,39 @@ func SparseClone(ctx context.Context, owner, repo, destDir, token string) error 
 	return nil
 }
 
+// askPassScript answers git credential prompts: "x-access-token" for the
+// username, the token (from the environment, never on disk or in argv) for
+// the password.
+const askPassScript = `#!/bin/sh
+case "$1" in
+  [Uu]sername*) printf 'x-access-token\n' ;;
+  *) printf '%s\n' "$FLUXGATE_GIT_TOKEN" ;;
+esac
+`
+
+// writeAskPass writes the askpass helper to a temp file and returns its path
+// plus a cleanup func. The previous GIT_ASKPASS=printf approach echoed the
+// prompt text back as the credential, so token auth never actually worked.
+func writeAskPass() (string, func(), error) {
+	dir, err := os.MkdirTemp("", "fluxgate-askpass-*")
+	if err != nil {
+		return "", nil, err
+	}
+	script := filepath.Join(dir, "askpass.sh")
+	if err := os.WriteFile(script, []byte(askPassScript), 0o700); err != nil {
+		os.RemoveAll(dir)
+		return "", nil, err
+	}
+	return script, func() { os.RemoveAll(dir) }, nil
+}
+
 // tokenAskPassEnv returns environment variables that inject a GitHub token
 // via GIT_ASKPASS, keeping the token out of process argument lists.
-func tokenAskPassEnv(token string) []string {
+func tokenAskPassEnv(askPass, token string) []string {
 	return []string{
-		"GIT_ASKPASS=printf",
+		"GIT_ASKPASS=" + askPass,
 		"GIT_TERMINAL_PROMPT=0",
-		fmt.Sprintf("GIT_PASSWORD=%s", token),
+		"FLUXGATE_GIT_TOKEN=" + token,
 	}
 }
 
@@ -102,9 +129,24 @@ type Repo struct {
 // CloneAndScan clones repos concurrently, calling scanFn on each clone as it
 // completes. Each clone is removed after scanning unless keepDir is non-empty.
 // This bounds disk usage to O(concurrency) rather than O(total repos).
-func CloneAndScan(ctx context.Context, repos []Repo, concurrency int, token, keepDir string, scanFn ScanFunc) []CloneResult {
+// Tokens are assigned to clones round-robin so a --tokens pool spreads git
+// rate-limit load; pass nil for unauthenticated clones.
+func CloneAndScan(ctx context.Context, repos []Repo, concurrency int, tokens []string, keepDir string, scanFn ScanFunc) []CloneResult {
 	if concurrency < 1 {
 		concurrency = 5
+	}
+
+	var askPass string
+	if len(tokens) > 0 {
+		var cleanup func()
+		var err error
+		askPass, cleanup, err = writeAskPass()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not set up git credentials, cloning unauthenticated: %v\n", err)
+			tokens = nil
+		} else {
+			defer cleanup()
+		}
 	}
 
 	results := make([]CloneResult, len(repos))
@@ -146,7 +188,11 @@ func CloneAndScan(ctx context.Context, repos []Repo, concurrency int, token, kee
 				defer os.RemoveAll(tmpDir)
 			}
 
-			if err := SparseClone(ctx, owner, name, repoDir, token); err != nil {
+			token := ""
+			if len(tokens) > 0 {
+				token = tokens[idx%len(tokens)]
+			}
+			if err := SparseClone(ctx, owner, name, repoDir, askPass, token); err != nil {
 				results[idx].Err = err
 				return
 			}

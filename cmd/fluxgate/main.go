@@ -253,28 +253,29 @@ func newBatchCmd() *cobra.Command {
 				return generateReport(db, reportPath)
 			}
 
-			// Build client with token rotation support
+			// Build the token pool: --tokens/$GITHUB_TOKENS for rotation,
+			// falling back to --token/$GITHUB_TOKEN. Both the API client and
+			// the clone path draw from the same pool.
 			if tokens == "" {
 				tokens = os.Getenv("GITHUB_TOKENS")
 			}
-			var client *ghclient.Client
-			if tokens != "" {
-				tokenList := strings.Split(tokens, ",")
-				out := tokenList[:0]
-				for _, t := range tokenList {
-					t = strings.TrimSpace(t)
-					if t != "" {
-						out = append(out, t)
-					}
+			var tokenList []string
+			for _, t := range strings.Split(tokens, ",") {
+				if t = strings.TrimSpace(t); t != "" {
+					tokenList = append(tokenList, t)
 				}
-				tokenList = out
-				client = ghclient.NewClientWithTokens(tokenList)
-				fmt.Printf("Using %d PATs with rotation\n", len(tokenList))
-			} else {
+			}
+			if len(tokenList) == 0 {
 				if token == "" {
 					token = os.Getenv("GITHUB_TOKEN")
 				}
-				client = ghclient.NewClient(token)
+				if token != "" {
+					tokenList = []string{token}
+				}
+			}
+			client := ghclient.NewClientWithTokens(tokenList)
+			if len(tokenList) > 1 {
+				fmt.Printf("Using %d PATs with rotation\n", len(tokenList))
 			}
 
 			if useClone {
@@ -324,7 +325,7 @@ func newBatchCmd() *cobra.Command {
 			if useClone {
 				return batchScanWithClone(ctx, repos, cloneScanOptions{
 					DB:          db,
-					Token:       token,
+					Tokens:      tokenList,
 					ScanOpts:    parseScanOpts(severities, rules),
 					Resume:      resume,
 					Concurrency: concurrency,
@@ -375,7 +376,7 @@ func newBatchCmd() *cobra.Command {
 // cloneScanOptions groups parameters for clone-based batch scanning.
 type cloneScanOptions struct {
 	DB          *store.DB
-	Token       string
+	Tokens      []string
 	ScanOpts    scanner.ScanOptions
 	Resume      bool
 	Concurrency int
@@ -396,6 +397,10 @@ func batchScanWithClone(ctx context.Context, repos []ghclient.RepoInfo, copts cl
 			if already {
 				continue
 			}
+		}
+		// Skip repos known to have no workflows — no point spawning git for them.
+		if copts.DB.HasNoWorkflows(repo.Owner, repo.Name, 7) {
+			continue
 		}
 		toScan = append(toScan, repo)
 	}
@@ -421,7 +426,7 @@ func batchScanWithClone(ctx context.Context, repos []ghclient.RepoInfo, copts cl
 
 	fmt.Printf("Scanning %d repos via clone (concurrency: %d)...\n", len(toScan), copts.Concurrency)
 
-	results := gitclone.CloneAndScan(ctx, cloneRepos, copts.Concurrency, copts.Token, copts.KeepDir,
+	results := gitclone.CloneAndScan(ctx, cloneRepos, copts.Concurrency, copts.Tokens, copts.KeepDir,
 		func(owner, name, dir string, cr *gitclone.CloneResult) error {
 			key := owner + "/" + name
 			info := repoInfo[key]
@@ -435,6 +440,9 @@ func batchScanWithClone(ctx context.Context, repos []ghclient.RepoInfo, copts cl
 				return err
 			}
 
+			if scanResult.Workflows == 0 {
+				copts.DB.MarkNoWorkflows(owner, name)
+			}
 			cr.SetFindings(len(scanResult.Findings), scanResult.Workflows)
 			scanResult.Path = key
 			return copts.DB.SaveResult(owner, name, info.Stars, info.Language, scanResult)
@@ -540,9 +548,13 @@ func newDiscoverCmd() *cobra.Command {
 			defer db.Close()
 
 			if useClone {
+				var cloneTokens []string
+				if token != "" {
+					cloneTokens = []string{token}
+				}
 				return batchScanWithClone(ctx, repos, cloneScanOptions{
 					DB:          db,
-					Token:       token,
+					Tokens:      cloneTokens,
 					ScanOpts:    parseScanOpts(severities, rules),
 					Resume:      resume,
 					Concurrency: concurrency,

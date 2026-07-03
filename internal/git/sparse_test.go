@@ -40,7 +40,7 @@ func TestSparseClone(t *testing.T) {
 	ctx := context.Background()
 	cloneDir := filepath.Join(t.TempDir(), "clone")
 
-	err := SparseClone(ctx, "actions", "checkout", cloneDir, "")
+	err := SparseClone(ctx, "actions", "checkout", cloneDir, "", "")
 	if err != nil {
 		t.Fatalf("SparseClone() error: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestSparseCloneInvalidRepo(t *testing.T) {
 	ctx := context.Background()
 	cloneDir := filepath.Join(t.TempDir(), "clone")
 
-	err := SparseClone(ctx, "nonexistent-owner-xyzzy", "nonexistent-repo-xyzzy", cloneDir, "")
+	err := SparseClone(ctx, "nonexistent-owner-xyzzy", "nonexistent-repo-xyzzy", cloneDir, "", "")
 	if err == nil {
 		t.Fatal("expected error for invalid repo, got nil")
 	}
@@ -94,7 +94,7 @@ func TestCloneAndScan(t *testing.T) {
 	}
 
 	var scannedDirs []string
-	results := CloneAndScan(ctx, repos, 2, "", "",
+	results := CloneAndScan(ctx, repos, 2, nil, "",
 		func(owner, name, dir string, cr *CloneResult) error {
 			scannedDirs = append(scannedDirs, dir)
 			cr.SetFindings(5, 2)
