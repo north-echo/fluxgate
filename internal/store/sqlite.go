@@ -62,6 +62,14 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("setting busy timeout: %w", err)
 	}
 
+	// Under WAL, synchronous=NORMAL is crash-safe (a power loss can lose the
+	// last transaction but never corrupt the database) and skips one fsync
+	// per commit — a large win for batch scans and merges.
+	if _, err := db.Exec("PRAGMA synchronous=NORMAL"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("setting synchronous mode: %w", err)
+	}
+
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("running migrations: %w", err)
@@ -81,6 +89,7 @@ func runMigrations(db *sqlx.DB) {
 	db.Exec(migration004NoWorkflows)
 	db.Exec(migration005AddRepoLists)
 	db.Exec(migration006AddWorkflowHash)
+	db.Exec(migration007Indexes)
 }
 
 // RepoListEntry holds a cached repo from a saved list.
@@ -204,13 +213,16 @@ func (d *DB) SaveResultWithSource(owner, name string, stars int, language string
 		return err
 	}
 
+	stmt, err := tx.Preparex(
+		`INSERT INTO findings (repo_id, workflow_path, rule_id, severity, line_number, description, details, workflow_hash)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return fmt.Errorf("preparing finding insert: %w", err)
+	}
+	defer stmt.Close()
+
 	for _, f := range result.Findings {
-		_, err := tx.Exec(
-			`INSERT INTO findings (repo_id, workflow_path, rule_id, severity, line_number, description, details, workflow_hash)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			repoID, f.File, f.RuleID, f.Severity, f.Line, f.Message, f.Details, f.WorkflowHash,
-		)
-		if err != nil {
+		if _, err := stmt.Exec(repoID, f.File, f.RuleID, f.Severity, f.Line, f.Message, f.Details, f.WorkflowHash); err != nil {
 			return fmt.Errorf("inserting finding: %w", err)
 		}
 	}

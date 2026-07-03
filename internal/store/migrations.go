@@ -83,6 +83,11 @@ ALTER TABLE findings ADD COLUMN workflow_hash TEXT DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_findings_workflow_hash ON findings(workflow_hash);
 `
 
+const migration007Indexes = `
+CREATE INDEX IF NOT EXISTS idx_findings_dedup ON findings(repo_id, workflow_path, rule_id, line_number);
+CREATE INDEX IF NOT EXISTS idx_repos_findings_count ON repos(findings_count DESC);
+`
+
 const migration005AddRepoLists = `
 CREATE TABLE IF NOT EXISTS repo_lists (
     id INTEGER PRIMARY KEY,
