@@ -4,6 +4,8 @@
 // detection with shared rule logic.
 package cicd
 
+import "strings"
+
 // TriggerType categorizes CI/CD pipeline triggers by trust level.
 type TriggerType string
 
@@ -75,6 +77,16 @@ type PipelineJob struct {
 	Permissions map[string]string
 	IdTokens    map[string]string // OIDC id_tokens (audience -> token name)
 	CacheKeys   []string          // Cache key patterns
+}
+
+// HasCondition reports whether any of the job's conditions contains substr.
+func (j PipelineJob) HasCondition(substr string) bool {
+	for _, cond := range j.Conditions {
+		if strings.Contains(cond, substr) {
+			return true
+		}
+	}
+	return false
 }
 
 // PipelineStep represents a single step/script block in a job.

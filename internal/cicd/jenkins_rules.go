@@ -24,15 +24,7 @@ func checkJenkinsPRSecrets(pipeline *JenkinsPipeline) []JenkinsFinding {
 	var findings []JenkinsFinding
 
 	for _, job := range pipeline.Jobs() {
-		isChangeRequest := false
-		for _, cond := range job.Conditions {
-			if strings.Contains(cond, "changeRequest") {
-				isChangeRequest = true
-				break
-			}
-		}
-
-		if !isChangeRequest {
+		if !job.HasCondition("changeRequest") {
 			continue
 		}
 
@@ -102,15 +94,7 @@ func checkJenkinsSelfHostedRunner(pipeline *JenkinsPipeline) []JenkinsFinding {
 	var findings []JenkinsFinding
 
 	for _, job := range pipeline.Jobs() {
-		isChangeRequest := false
-		for _, cond := range job.Conditions {
-			if strings.Contains(cond, "changeRequest") {
-				isChangeRequest = true
-				break
-			}
-		}
-
-		if !isChangeRequest {
+		if !job.HasCondition("changeRequest") {
 			continue
 		}
 

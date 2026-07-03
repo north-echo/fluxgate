@@ -167,11 +167,9 @@ func inferJenkinsTriggers(triggersBlock string, jobs []PipelineJob) []TriggerTyp
 
 	// Check stages for changeRequest() when blocks
 	for _, job := range jobs {
-		for _, cond := range job.Conditions {
-			if strings.Contains(cond, "changeRequest") {
-				triggers = append(triggers, TriggerExternalPR)
-				return triggers
-			}
+		if job.HasCondition("changeRequest") {
+			triggers = append(triggers, TriggerExternalPR)
+			return triggers
 		}
 	}
 
