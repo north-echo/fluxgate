@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -32,10 +33,11 @@ const httpTimeout = 30 * time.Second
 // Client wraps the GitHub API for fetching workflow files.
 type Client struct {
 	gh      *gh.Client
-	tokens  []string      // all available tokens
-	clients []*gh.Client  // one client per token
+	raw     *http.Client // plain client for download_url fetches
+	tokens  []string     // all available tokens
+	clients []*gh.Client // one client per token
 	mu      sync.Mutex
-	idx     int           // current token index
+	idx     int // current token index
 
 	// remaining tracks the most recently observed core rate-limit budget
 	// across all goroutines. -1 means no response observed yet.
@@ -47,10 +49,13 @@ func NewClient(token string) *Client {
 	if token != "" {
 		return NewClientWithTokens([]string{token})
 	}
-	c := &Client{gh: gh.NewClient(&http.Client{
-		Timeout:   httpTimeout,
-		Transport: newAPITransport(),
-	})}
+	c := &Client{
+		gh: gh.NewClient(&http.Client{
+			Timeout:   httpTimeout,
+			Transport: newAPITransport(),
+		}),
+		raw: &http.Client{Timeout: httpTimeout, Transport: newAPITransport()},
+	}
 	c.remaining.Store(-1)
 	return c
 }
@@ -75,6 +80,7 @@ func NewClientWithTokens(tokens []string) *Client {
 
 	c := &Client{
 		gh:      clients[0],
+		raw:     &http.Client{Timeout: httpTimeout, Transport: newAPITransport()},
 		tokens:  tokens,
 		clients: clients,
 		idx:     0,
@@ -152,7 +158,21 @@ func (c *Client) FetchWorkflows(ctx context.Context, owner, repo string) ([]Work
 			continue
 		}
 
-		content, err := c.fetchFileContent(ctx, owner, repo, entry.GetPath())
+		// Prefer the raw download URL from the directory listing: those
+		// fetches do not count against the core API rate limit, unlike a
+		// per-file Contents call.
+		var content []byte
+		var err error
+		if url := entry.GetDownloadURL(); url != "" {
+			content, err = c.fetchRaw(ctx, url)
+		} else {
+			content, err = c.fetchFileContent(ctx, owner, repo, entry.GetPath())
+		}
+		if err != nil {
+			// Raw fetch can fail where the API succeeds (e.g. expired
+			// signed URL on private repos); fall back before giving up.
+			content, err = c.fetchFileContent(ctx, owner, repo, entry.GetPath())
+		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  Warning: could not fetch %s: %v\n", entry.GetPath(), err)
 			continue
@@ -165,6 +185,27 @@ func (c *Client) FetchWorkflows(ctx context.Context, owner, repo string) ([]Work
 	}
 
 	return workflows, nil
+}
+
+// maxRawFetch caps raw workflow downloads; the scanner rejects YAML over
+// 10MB anyway (scanner.MaxYAMLSize).
+const maxRawFetch = 10<<20 + 1
+
+// fetchRaw downloads file content from a download_url (raw.githubusercontent.com).
+func (c *Client) fetchRaw(ctx context.Context, url string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.raw.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("raw fetch %s: HTTP %d", url, resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, maxRawFetch))
 }
 
 // fetchFileContent fetches the content of a single file.
