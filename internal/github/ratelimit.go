@@ -114,6 +114,14 @@ func withRetryRotate[T any](ctx context.Context, c *Client, fnFactory func() ret
 		}
 		rotations = 0 // all tokens tried; back off, then rotate again
 
+		// Quota truly exhausted with a distant reset: exponential backoff
+		// capped at 60s cannot outlast it — it would just burn ~5 minutes
+		// per call and fail anyway. Surface a clear error instead.
+		if isRateLimited(err) && resp != nil && time.Until(resp.Rate.Reset.Time) > maxBackoff {
+			return zero, fmt.Errorf("rate limit exhausted on all tokens, resets at %s: %w",
+				resp.Rate.Reset.Time.Local().Format("15:04:05"), err)
+		}
+
 		if attempt == maxRetries {
 			return zero, err
 		}
