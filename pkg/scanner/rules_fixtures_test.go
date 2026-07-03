@@ -785,9 +785,9 @@ func TestClassifyPipInstall(t *testing.T) {
 		{"--upgrade pip", false},
 	}
 	for _, tt := range tests {
-		confirmed, _ := classifyPipInstall(tt.args)
+		confirmed, _ := ClassifyPipInstall(tt.args)
 		if confirmed != tt.confirmed {
-			t.Errorf("classifyPipInstall(%q) = %v, want %v", tt.args, confirmed, tt.confirmed)
+			t.Errorf("ClassifyPipInstall(%q) = %v, want %v", tt.args, confirmed, tt.confirmed)
 		}
 	}
 }
