@@ -54,12 +54,14 @@ func ScanDirectory(dir string, opts ScanOptions) (*ScanResult, error) {
 			}
 
 			path := filepath.Join(workflowDir, name)
-			findings, err := ScanFile(path, opts)
+			wf, err := ParseWorkflowFile(path)
 			if err != nil {
 				continue // skip unparseable files
 			}
+			// scanWorkflow, not ScanFile: the aggregate is sorted once below,
+			// so per-file sorting would be wasted work.
 			result.Workflows++
-			result.Findings = append(result.Findings, findings...)
+			result.Findings = append(result.Findings, scanWorkflow(wf, opts)...)
 		}
 	}
 
@@ -137,17 +139,22 @@ func ScanFile(path string, opts ScanOptions) ([]Finding, error) {
 
 // ScanWorkflow runs all enabled rules against a parsed workflow.
 func ScanWorkflow(wf *Workflow, opts ScanOptions) []Finding {
-	allRules := AllRules()
-	enabledRules := make(map[string]Rule)
+	findings := scanWorkflow(wf, opts)
+	sortFindings(findings)
+	return findings
+}
 
+// scanWorkflow runs the rules without sorting, for callers that sort the
+// aggregate themselves (ScanDirectory).
+func scanWorkflow(wf *Workflow, opts ScanOptions) []Finding {
+	enabledRules := allRules
 	if len(opts.Rules) > 0 {
+		enabledRules = make(map[string]Rule, len(opts.Rules))
 		for _, id := range opts.Rules {
 			if r, ok := allRules[id]; ok {
 				enabledRules[id] = r
 			}
 		}
-	} else {
-		enabledRules = allRules
 	}
 
 	var findings []Finding
@@ -183,7 +190,6 @@ func ScanWorkflow(wf *Workflow, opts ScanOptions) []Finding {
 		findings = filtered
 	}
 
-	sortFindings(findings)
 	return findings
 }
 

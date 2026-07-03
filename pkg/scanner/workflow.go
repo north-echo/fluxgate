@@ -182,8 +182,7 @@ func ParseWorkflow(data []byte, path string) (*Workflow, error) {
 				Env:  rawS.Env,
 			}
 			// Try to get line number from our extracted map
-			key := fmt.Sprintf("%s.%d", jobName, i)
-			if line, ok := stepLines[key]; ok {
+			if line, ok := stepLines[stepKey{jobName, i}]; ok {
 				step.Line = line
 			}
 			job.Steps = append(job.Steps, step)
@@ -194,9 +193,16 @@ func ParseWorkflow(data []byte, path string) (*Workflow, error) {
 	return wf, nil
 }
 
+// stepKey identifies a step by job name and index, avoiding per-step
+// fmt.Sprintf key construction on both the write and read side.
+type stepKey struct {
+	job string
+	idx int
+}
+
 // extractStepLines walks the YAML node tree to find line numbers for each step.
-func extractStepLines(doc *yaml.Node) map[string]int {
-	lines := make(map[string]int)
+func extractStepLines(doc *yaml.Node) map[stepKey]int {
+	lines := make(map[stepKey]int)
 	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
 		return lines
 	}
@@ -224,8 +230,7 @@ func extractStepLines(doc *yaml.Node) map[string]int {
 							continue
 						}
 						for idx, stepNode := range stepsNode.Content {
-							key := fmt.Sprintf("%s.%d", jobName, idx)
-							lines[key] = stepNode.Line
+							lines[stepKey{jobName, idx}] = stepNode.Line
 						}
 					}
 				}

@@ -1103,7 +1103,7 @@ func containsLabelCheck(ifExpr string) bool {
 	}
 	lower := strings.ToLower(ifExpr)
 	for _, p := range labelPatterns {
-		if strings.Contains(lower, strings.ToLower(p)) {
+		if strings.Contains(lower, p) { // patterns are already lowercase
 			return true
 		}
 	}
@@ -1567,7 +1567,7 @@ func isTrustedRef(ref string) bool {
 	}
 	lower := strings.ToLower(ref)
 	for _, t := range trusted {
-		if lower == strings.ToLower(t) {
+		if lower == t { // trusted entries are already lowercase
 			return true
 		}
 	}
@@ -1579,8 +1579,9 @@ func isTrustedRef(ref string) bool {
 
 // hasPermissionCheck detects if a job verifies collaborator permissions via GitHub API.
 func hasPermissionCheck(job Job) bool {
+	// Lowercased up front; compared against a lowercased haystack.
 	permPatterns := []string{
-		"getCollaboratorPermissionLevel",
+		"getcollaboratorpermissionlevel",
 		"collaborator-permission",
 		"check-permissions",
 		"permission-level",
@@ -1596,7 +1597,7 @@ func hasPermissionCheck(job Job) bool {
 		}
 		lower := strings.ToLower(target)
 		for _, p := range permPatterns {
-			if strings.Contains(lower, strings.ToLower(p)) {
+			if strings.Contains(lower, p) {
 				return true
 			}
 		}
@@ -3252,6 +3253,14 @@ type iocEntry struct {
 	Needle   string // substring to match (case-insensitive)
 	Campaign string // short campaign tag for the finding message
 	Note     string // one-line explanation of what the indicator means
+
+	needleLower string // precomputed in init; matching runs per step scanned
+}
+
+func init() {
+	for i := range knownIOCs {
+		knownIOCs[i].needleLower = strings.ToLower(knownIOCs[i].Needle)
+	}
 }
 
 // knownIOCs is the catalog of substrings to flag in workflow Run blocks, env
@@ -3286,29 +3295,30 @@ func CheckKnownIOCs(wf *Workflow) []Finding {
 				where string
 				text  string
 			}{
-				{"run block", step.Run},
-				{"uses ref", step.Uses},
+				{"run block", strings.ToLower(step.Run)},
+				{"uses ref", strings.ToLower(step.Uses)},
 			}
 			for k, v := range step.Env {
 				haystacks = append(haystacks, struct {
 					where string
 					text  string
-				}{fmt.Sprintf("env.%s", k), v})
+				}{"env." + k, strings.ToLower(v)})
 			}
 			for k, v := range step.With {
 				haystacks = append(haystacks, struct {
 					where string
 					text  string
-				}{fmt.Sprintf("with.%s", k), v})
+				}{"with." + k, strings.ToLower(v)})
 			}
 
+			// Haystacks are lowercased once above; re-lowercasing inside the
+			// IOC loop would repeat the work once per catalog entry.
 			for _, ioc := range knownIOCs {
-				needle := strings.ToLower(ioc.Needle)
 				for _, h := range haystacks {
 					if h.text == "" {
 						continue
 					}
-					if !strings.Contains(strings.ToLower(h.text), needle) {
+					if !strings.Contains(h.text, ioc.needleLower) {
 						continue
 					}
 					findings = append(findings, Finding{
