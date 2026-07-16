@@ -1,0 +1,16 @@
+name: PR Merge Ref Checkout
+on:
+  pull_request_target:
+    types: [opened]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch and checkout PR merge ref
+        run: |
+          git fetch origin refs/pull/${{ github.event.number }}/merge:pr-merge
+          git checkout pr-merge
+      - run: pip install -e ".[dev,test]"
+        env:
+          API_KEY: ${{ secrets.API_KEY }}
