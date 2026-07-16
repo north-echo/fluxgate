@@ -1,0 +1,17 @@
+name: Fetch Without Checkout
+on:
+  pull_request_target:
+    types: [opened, synchronize]
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone base and fetch PR to a ref
+        run: |
+          git clone --depth 1 https://github.com/example/project base
+          cd base
+          git fetch origin pull/${{ github.event.pull_request.number }}/head:pr
+      - name: Setup
+        uses: ./base/.github/actions/setup
+      - name: Process PR
+        run: base/scripts/process.sh
