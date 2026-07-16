@@ -1752,17 +1752,20 @@ func detectRunForkCheckout(job Job) runForkCheckout {
 	return runForkCheckout{found: false}
 }
 
-var fetchDstRefPattern = regexp.MustCompile(`head\s*:\s*([A-Za-z0-9][\w./-]*)`)
+// fetchDstRefPattern captures the local destination ref of a PR refspec. Both
+// `pull/N/head:<dst>` (PR head) and `pull/N/merge:<dst>` (GitHub's auto-merge of
+// head into base) carry attacker-influenced content, so both are captured.
+var fetchDstRefPattern = regexp.MustCompile(`(?:head|merge)\s*:\s*([A-Za-z0-9][\w./-]*)`)
 
 // lineFetchesPRHead reports whether a single line is a `git fetch` of the PR
-// head, and returns the local destination ref if the refspec names one
-// (`pull/N/head:pr-head` -> "pr-head"). Empty dst means the fetch lands in
+// head or merge ref, and returns the local destination ref if the refspec names
+// one (`pull/N/head:pr-head` -> "pr-head"). Empty dst means the fetch lands in
 // FETCH_HEAD.
 func lineFetchesPRHead(line string) (dst string, ok bool) {
 	if !strings.Contains(line, "git fetch") {
 		return "", false
 	}
-	prHead := (strings.Contains(line, "pull/") && strings.Contains(line, "/head")) ||
+	prHead := (strings.Contains(line, "pull/") && (strings.Contains(line, "/head") || strings.Contains(line, "/merge"))) ||
 		strings.Contains(line, "github.event.number") ||
 		strings.Contains(line, "github.event.pull_request.number") ||
 		strings.Contains(line, "github.event.pull_request.head.sha") ||

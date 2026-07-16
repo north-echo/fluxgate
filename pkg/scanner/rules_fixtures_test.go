@@ -874,6 +874,21 @@ func TestCheckPwnRequest_PathspecCheckoutIsolated(t *testing.T) {
 	}
 }
 
+// Fetching the PR *merge* ref to a named ref and then checking it out places
+// attacker-influenced content in the tree — the destination ref must be tracked
+// (not only `head:` refspecs) so the following checkout is recognized.
+func TestCheckPwnRequest_MergeRefCheckout(t *testing.T) {
+	wf := loadFixture(t, "pwn-request-merge-ref-checkout.yaml")
+	findings := CheckPwnRequest(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 FG-001 finding for merge-ref checkout, got %d: %v", len(findings), findings)
+	}
+	if findings[0].Severity == SeverityInfo {
+		t.Errorf("expected elevated severity for merge-ref checkout + install, got %s", findings[0].Severity)
+	}
+}
+
 // Same pathspec-limited checkout, but the executed script lives UNDER the fork
 // subpath (`python Lib/setup.py`) — fork code runs, so isolation must NOT apply.
 func TestCheckPwnRequest_PathspecCheckoutExecutesFork(t *testing.T) {
