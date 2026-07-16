@@ -855,6 +855,40 @@ func TestCheckPwnRequest_GitFetchSHAPinned(t *testing.T) {
 	}
 }
 
+// A pathspec-limited PR-head checkout (`git checkout <sha> -- Lib/`) that only
+// overwrites a data subdir, with a trusted base checkout at root and scripts
+// executed from outside the fork subpath, is isolated — suppress to info.
+func TestCheckPwnRequest_PathspecCheckoutIsolated(t *testing.T) {
+	wf := loadFixture(t, "pwn-request-pathspec-checkout.yaml")
+	findings := CheckPwnRequest(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 FG-001 finding, got %d: %v", len(findings), findings)
+	}
+	f := findings[0]
+	if f.Severity != SeverityInfo {
+		t.Errorf("expected info severity for pathspec-checkout isolation, got %s", f.Severity)
+	}
+	if !strings.Contains(f.Message, "pathspec-checkout isolation") {
+		t.Errorf("expected pathspec-checkout isolation detail in message, got: %s", f.Message)
+	}
+}
+
+// Same pathspec-limited checkout, but the executed script lives UNDER the fork
+// subpath (`python Lib/setup.py`) — fork code runs, so isolation must NOT apply.
+func TestCheckPwnRequest_PathspecCheckoutExecutesFork(t *testing.T) {
+	wf := loadFixture(t, "pwn-request-pathspec-exec.yaml")
+	findings := CheckPwnRequest(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 FG-001 finding, got %d: %v", len(findings), findings)
+	}
+	f := findings[0]
+	if f.Severity == SeverityInfo {
+		t.Errorf("expected non-info severity when fork subpath is executed, got %s", f.Severity)
+	}
+}
+
 // --- FG-002 extension: workflow_dispatch/call injection ---
 
 func TestCheckScriptInjection_DispatchInputs(t *testing.T) {
@@ -1060,6 +1094,30 @@ func TestCheckLocalActionUntrustedCheckout_TrustedRefIsolated(t *testing.T) {
 	findings := CheckLocalActionUntrustedCheckout(wf)
 	if len(findings) != 0 {
 		t.Fatalf("expected 0 findings for trusted-ref isolation pattern, got %d: %v", len(findings), findings)
+	}
+}
+
+// A run block that fetches the PR head to a named ref but never checks it out
+// leaves fork code off the working tree; a local action loaded afterward comes
+// from the base clone, not the fork. No FG-016 finding.
+func TestCheckLocalActionUntrustedCheckout_FetchWithoutCheckout(t *testing.T) {
+	wf := loadFixture(t, "local-action-fetch-no-checkout.yaml")
+	findings := CheckLocalActionUntrustedCheckout(wf)
+	if len(findings) != 0 {
+		t.Fatalf("expected 0 findings when PR head is fetched but not checked out, got %d: %v", len(findings), findings)
+	}
+}
+
+// A run block that fetches AND checks out the PR head (git checkout FETCH_HEAD)
+// does place fork code on disk — a following local action is attacker-controlled.
+func TestCheckLocalActionUntrustedCheckout_RunCheckout(t *testing.T) {
+	wf := loadFixture(t, "local-action-run-checkout.yaml")
+	findings := CheckLocalActionUntrustedCheckout(wf)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 FG-016 finding for run-based checkout, got %d: %v", len(findings), findings)
+	}
+	if findings[0].Severity != SeverityCritical {
+		t.Errorf("expected critical severity, got %s", findings[0].Severity)
 	}
 }
 

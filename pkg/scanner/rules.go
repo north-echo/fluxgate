@@ -114,15 +114,19 @@ func CheckPwnRequest(wf *Workflow) []Finding {
 			}
 		}
 
-		// Check for git-based PR checkout in run blocks
+		// Check for git-based PR checkout in run blocks. A bare `git fetch` of
+		// the PR head does not put fork code in the tree — require an actual
+		// checkout/merge/reset of it (detectRunForkCheckout enforces this).
+		runPathspec := ""
+		runCheckout := false
 		if checkoutIdx == -1 {
-			for i, step := range job.Steps {
-				if step.Run != "" && runFetchesPRHead(step.Run) {
-					checkoutIdx = i
-					checkoutLine = step.Line
-					checkoutRef = "git fetch (PR head)"
-					break
-				}
+			if rc := detectRunForkCheckout(job); rc.found {
+				checkoutIdx = rc.index
+				checkoutLine = job.Steps[rc.index].Line
+				checkoutRef = "git fetch + checkout (PR head)"
+				checkoutPath = rc.pathspec
+				runPathspec = rc.pathspec
+				runCheckout = true
 			}
 		}
 
@@ -180,6 +184,17 @@ func CheckPwnRequest(wf *Workflow) []Finding {
 			severity = SeverityInfo
 			confidence = ConfidencePatternOnly
 			mitigated = true
+		}
+
+		// Pathspec-limited checkout isolation: fork code entered the tree only via
+		// `git checkout <pr-head> -- <subpath>`, a trusted ref populated the root,
+		// and nothing executes from the fork subpath — executed scripts are trusted.
+		if runCheckout && pathspecForkCheckoutIsolated(job, checkoutIdx, runPathspec, postCheckoutSteps) {
+			severity = SeverityInfo
+			confidence = ConfidencePatternOnly
+			mitigated = true
+			mitigation.Details = append(mitigation.Details, fmt.Sprintf(
+				"pathspec-checkout isolation: fork content limited to '%s/', executed scripts from trusted ref", runPathspec))
 		}
 
 		// Permission gate job: upstream job verifies collaborator access — internal threat only
@@ -1556,6 +1571,12 @@ func isTrustedRef(ref string) bool {
 	if strings.Contains(lower, "trusted") || strings.Contains(lower, "base_ref") {
 		return true
 	}
+	// pull_request(_target) base ref/sha resolve to the base branch (trusted).
+	// The expression form uses dots (`pull_request.base.ref`), distinct from the
+	// `github.base_ref` context handled above. head.ref/head.sha are NOT trusted.
+	if strings.Contains(lower, "pull_request.base.") {
+		return true
+	}
 	return false
 }
 
@@ -1675,11 +1696,7 @@ func runFetchesPRHead(run string) bool {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		if strings.Contains(line, "git fetch") &&
-			(strings.Contains(line, "pull/") && strings.Contains(line, "/head") ||
-				strings.Contains(line, "github.event.number") ||
-				strings.Contains(line, "github.event.pull_request.number") ||
-				strings.Contains(line, "github.event.pull_request.head.sha")) {
+		if _, ok := lineFetchesPRHead(line); ok {
 			return true
 		}
 		if strings.Contains(line, "gh pr checkout") {
@@ -1687,6 +1704,153 @@ func runFetchesPRHead(run string) bool {
 		}
 	}
 	return false
+}
+
+// runForkCheckout describes how PR-head content enters the working tree via
+// git commands inside run blocks. A bare `git fetch <pr-head>` populates a ref
+// or FETCH_HEAD but leaves the working tree on trusted code; only a subsequent
+// checkout/switch/merge/reset of that ref (or `gh pr checkout`) actually places
+// fork code on disk. pathspec is set when the checkout is limited to a subpath
+// (`git checkout <ref> -- <path>`), meaning only that subtree is attacker-controlled.
+type runForkCheckout struct {
+	index    int    // step index where fork code first lands in the tree
+	pathspec string // "" = whole tree; else limited to this subpath (normalized, no trailing slash)
+	found    bool
+}
+
+// detectRunForkCheckout scans a job's run steps in order and reports whether a
+// PR-head checkout actually reaches the working tree, and if so at which step
+// and limited to which pathspec. Fetch state is carried across steps because the
+// fetch and the checkout are often in separate steps.
+func detectRunForkCheckout(job Job) runForkCheckout {
+	prHeadFetched := false
+	dstRefs := map[string]bool{}
+	for i, step := range job.Steps {
+		if step.Run == "" {
+			continue
+		}
+		for _, raw := range strings.Split(step.Run, "\n") {
+			line := strings.TrimSpace(raw)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			// `gh pr checkout` both fetches and checks out the PR head into the tree.
+			if strings.Contains(line, "gh pr checkout") {
+				return runForkCheckout{index: i, pathspec: "", found: true}
+			}
+			if dst, ok := lineFetchesPRHead(line); ok {
+				prHeadFetched = true
+				if dst != "" {
+					dstRefs[dst] = true
+				}
+			}
+			if pathspec, ok := lineChecksOutPRHead(line, prHeadFetched, dstRefs); ok {
+				return runForkCheckout{index: i, pathspec: pathspec, found: true}
+			}
+		}
+	}
+	return runForkCheckout{found: false}
+}
+
+var fetchDstRefPattern = regexp.MustCompile(`head\s*:\s*([A-Za-z0-9][\w./-]*)`)
+
+// lineFetchesPRHead reports whether a single line is a `git fetch` of the PR
+// head, and returns the local destination ref if the refspec names one
+// (`pull/N/head:pr-head` -> "pr-head"). Empty dst means the fetch lands in
+// FETCH_HEAD.
+func lineFetchesPRHead(line string) (dst string, ok bool) {
+	if !strings.Contains(line, "git fetch") {
+		return "", false
+	}
+	prHead := (strings.Contains(line, "pull/") && strings.Contains(line, "/head")) ||
+		strings.Contains(line, "github.event.number") ||
+		strings.Contains(line, "github.event.pull_request.number") ||
+		strings.Contains(line, "github.event.pull_request.head.sha") ||
+		strings.Contains(line, "github.event.pull_request.head.ref") ||
+		strings.Contains(line, "github.head_ref")
+	if !prHead {
+		return "", false
+	}
+	if m := fetchDstRefPattern.FindStringSubmatch(line); m != nil {
+		return m[1], true
+	}
+	return "", true
+}
+
+// lineChecksOutPRHead reports whether a single line moves the working tree to
+// PR-head content, and the pathspec it is limited to (empty = whole tree). A
+// checkout targets PR head when it references a PR-head expression, FETCH_HEAD
+// (after a PR-head fetch), or a local ref created by such a fetch.
+func lineChecksOutPRHead(line string, prHeadFetched bool, dstRefs map[string]bool) (pathspec string, ok bool) {
+	treeMutators := []string{"git checkout", "git switch", "git merge", "git rebase", "git cherry-pick", "git reset --hard", "git reset --merge"}
+	isMutator := false
+	for _, m := range treeMutators {
+		if strings.Contains(line, m) {
+			isMutator = true
+			break
+		}
+	}
+	if !isMutator {
+		return "", false
+	}
+
+	targetsPRHead := strings.Contains(line, "github.event.pull_request.head.sha") ||
+		strings.Contains(line, "github.event.pull_request.head.ref") ||
+		strings.Contains(line, "github.head_ref")
+	if !targetsPRHead && prHeadFetched && strings.Contains(line, "FETCH_HEAD") {
+		targetsPRHead = true
+	}
+	if !targetsPRHead {
+		for ref := range dstRefs {
+			if containsWord(line, ref) {
+				targetsPRHead = true
+				break
+			}
+		}
+	}
+	if !targetsPRHead {
+		return "", false
+	}
+
+	// Pathspec-limited checkout: `git checkout <ref> -- <path> [<path>...]`.
+	if idx := strings.Index(line, " -- "); idx != -1 {
+		rest := strings.TrimSpace(line[idx+4:])
+		if first := strings.Fields(rest); len(first) > 0 {
+			return normalizePathspec(first[0]), true
+		}
+	}
+	return "", true
+}
+
+// containsWord reports whether word appears in s delimited by non-word chars,
+// so ref "pr" matches `git merge pr` but not `git merge preview`.
+func containsWord(s, word string) bool {
+	for {
+		i := strings.Index(s, word)
+		if i == -1 {
+			return false
+		}
+		before := i == 0 || !isRefWordChar(rune(s[i-1]))
+		after := i+len(word) >= len(s) || !isRefWordChar(rune(s[i+len(word)]))
+		if before && after {
+			return true
+		}
+		s = s[i+len(word):]
+	}
+}
+
+func isRefWordChar(r rune) bool {
+	return r == '_' || r == '-' || r == '/' || r == '.' ||
+		(r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+}
+
+// normalizePathspec strips quotes, a leading ./, and a trailing / so a pathspec
+// like `"Lib/"` compares equal to the `Lib` form used for checkout paths.
+func normalizePathspec(p string) string {
+	p = strings.Trim(p, `"'`)
+	p = strings.TrimPrefix(p, "./")
+	p = strings.TrimSuffix(p, "/")
+	return p
 }
 
 func containsExpression(run, expr string) bool {
@@ -2377,10 +2541,13 @@ func CheckLocalActionUntrustedCheckout(wf *Workflow) []Finding {
 				forkCheckoutPath = step.With["path"]
 				break
 			}
-			if step.Run != "" && runFetchesPRHead(step.Run) {
-				checkoutIdx = i
-				break
-			}
+		}
+		// Run-based checkout: a bare `git fetch` of the PR head leaves fork code
+		// off the working tree (it only populates a ref/FETCH_HEAD). Require an
+		// actual checkout/merge/reset before treating the tree as attacker-owned.
+		if rc := detectRunForkCheckout(job); rc.found && (checkoutIdx == -1 || rc.index < checkoutIdx) {
+			checkoutIdx = rc.index
+			forkCheckoutPath = rc.pathspec
 		}
 		if checkoutIdx == -1 {
 			continue
@@ -2442,6 +2609,136 @@ func localActionsTrustedRefIsolated(job Job, forkCheckoutIdx int, forkPath strin
 		}
 	}
 	return false
+}
+
+// pathspecForkCheckoutIsolated recognizes the hardened pattern where PR-head
+// content enters the tree only via a pathspec-limited checkout
+// (`git checkout <pr-head> -- <subpath>`), a prior checkout populated the root
+// from a trusted ref, and no post-checkout step executes code located under the
+// fork subpath. Fork content is confined to data files; executed scripts live
+// outside the subpath and come from trusted code.
+func pathspecForkCheckoutIsolated(job Job, checkoutIdx int, pathspec string, postCheckoutSteps []Step) bool {
+	if pathspec == "" || pathspec == "." {
+		return false
+	}
+	if !hasTrustedRootCheckoutBefore(job, checkoutIdx, pathspec) {
+		return false
+	}
+	for _, step := range postCheckoutSteps {
+		if step.Run != "" && runExecutesFromPath(step.Run, pathspec) {
+			return false
+		}
+	}
+	return true
+}
+
+// hasTrustedRootCheckoutBefore reports whether a step before idx checks out a
+// trusted ref into a location other than the fork pathspec (typically the
+// workspace root), so scripts outside the pathspec are trusted.
+func hasTrustedRootCheckoutBefore(job Job, idx int, pathspec string) bool {
+	if idx > len(job.Steps) {
+		idx = len(job.Steps)
+	}
+	for i := 0; i < idx; i++ {
+		step := job.Steps[i]
+		if !isCheckoutAction(step.Uses) {
+			continue
+		}
+		if normalizePathspec(step.With["path"]) == pathspec {
+			continue
+		}
+		if isTrustedRef(step.With["ref"]) {
+			return true
+		}
+	}
+	return false
+}
+
+var interpreterCmds = map[string]bool{
+	"python": true, "python3": true, "bash": true, "sh": true, "zsh": true,
+	"node": true, "ruby": true, "perl": true, "deno": true, "bun": true,
+	"pwsh": true, "php": true, "source": true, ".": true,
+}
+
+// runExecutesFromPath reports whether a run block executes an interpreter or
+// script whose target lives under path/ (or cd's into it). Data-only references
+// to path (e.g. `git diff -- 'Lib/*.py'`, string literals in an inline script)
+// do not count — only command-position execution does.
+func runExecutesFromPath(run, path string) bool {
+	prefix := path + "/"
+	for _, raw := range strings.Split(run, "\n") {
+		for _, cmd := range splitShellSegments(raw) {
+			fields := strings.Fields(cmd)
+			if len(fields) == 0 {
+				continue
+			}
+			head := strings.Trim(fields[0], `"'`)
+			args := fields[1:]
+			switch {
+			case head == "cd":
+				if len(args) > 0 && underPath(args[0], path, prefix) {
+					return true
+				}
+			case head == "pip" || head == "pip3":
+				for _, a := range args {
+					if underPath(a, path, prefix) {
+						return true
+					}
+				}
+			case head == "go":
+				if len(args) >= 2 && args[0] == "run" && underPath(args[1], path, prefix) {
+					return true
+				}
+			case head == "make":
+				for j, a := range args {
+					if a == "-C" && j+1 < len(args) && underPath(args[j+1], path, prefix) {
+						return true
+					}
+				}
+			case interpreterCmds[head]:
+				for _, a := range args {
+					if strings.HasPrefix(a, "-") {
+						continue
+					}
+					return underPath(a, path, prefix)
+				}
+			default:
+				// Direct execution of a script located under the fork path.
+				if underPath(head, path, prefix) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// underPath reports whether a shell token refers to a file under path.
+func underPath(tok, path, prefix string) bool {
+	tok = strings.Trim(tok, `"'`)
+	tok = strings.TrimPrefix(tok, "./")
+	tok = strings.TrimPrefix(tok, "$GITHUB_WORKSPACE/")
+	tok = strings.TrimPrefix(tok, "${GITHUB_WORKSPACE}/")
+	return tok == path || strings.HasPrefix(tok, prefix)
+}
+
+// splitShellSegments splits a line on shell command separators (&&, ||, ;, |)
+// so each segment can be inspected for a command in head position.
+func splitShellSegments(line string) []string {
+	line = strings.TrimSpace(line)
+	if line == "" || strings.HasPrefix(line, "#") {
+		return nil
+	}
+	fields := strings.FieldsFunc(line, func(r rune) bool {
+		return r == ';' || r == '|' || r == '&'
+	})
+	var segs []string
+	for _, f := range fields {
+		if s := strings.TrimSpace(f); s != "" {
+			segs = append(segs, s)
+		}
+	}
+	return segs
 }
 
 // CheckGitHubScriptInjection detects expression injection in actions/github-script (FG-017).
@@ -3454,6 +3751,65 @@ func CheckLifecycleInstallBeforeCredentialedOperation(wf *Workflow) []Finding {
 	return findings
 }
 
+// packageManagerTools are first-party CLIs that projects self-update globally.
+// A global install of only these runs no project dependency lifecycle scripts,
+// so it can't harvest a publish token — distinct from installing project deps.
+var packageManagerTools = map[string]bool{
+	"npm": true, "pnpm": true, "yarn": true, "corepack": true,
+}
+
+// isToolingSelfUpdate reports whether every node install command in the run is a
+// global self-update of the package-manager tooling (e.g. `npm install -g
+// npm@11`), with no project-dependency install present. Such a step installs no
+// untrusted dependencies and runs no project lifecycle scripts.
+func isToolingSelfUpdate(run string) bool {
+	sawInstall := false
+	for _, raw := range strings.Split(run, "\n") {
+		for _, seg := range splitShellSegments(raw) {
+			fields := strings.Fields(seg)
+			if len(fields) < 2 {
+				continue
+			}
+			mgr := fields[0]
+			if mgr != "npm" && mgr != "pnpm" && mgr != "yarn" {
+				continue
+			}
+			verb := fields[1]
+			isInstall := verb == "install" || verb == "i" || verb == "ci" || verb == "add" ||
+				(mgr == "yarn" && verb == "global")
+			if !isInstall {
+				continue
+			}
+			sawInstall = true
+			global := false
+			var pkgs []string
+			for _, a := range fields[2:] {
+				switch {
+				case a == "-g" || a == "--global" || a == "global":
+					global = true
+				case strings.HasPrefix(a, "-"):
+					// other flag, ignore
+				default:
+					pkgs = append(pkgs, a)
+				}
+			}
+			if !global || len(pkgs) == 0 {
+				return false
+			}
+			for _, p := range pkgs {
+				base := p
+				if at := strings.Index(base, "@"); at > 0 {
+					base = base[:at]
+				}
+				if !packageManagerTools[base] {
+					return false
+				}
+			}
+		}
+	}
+	return sawInstall
+}
+
 func lifecycleInstalls(wf *Workflow, job Job) []lifecycleInstall {
 	var installs []lifecycleInstall
 	for i, step := range job.Steps {
@@ -3475,21 +3831,21 @@ func lifecycleInstalls(wf *Workflow, job Job) []lifecycleInstall {
 			continue
 		}
 		if npmInstallPattern.MatchString(step.Run) {
-			if installScriptsSuppressed(wf, step, job, "npm") {
+			if installScriptsSuppressed(wf, step, job, "npm") || isToolingSelfUpdate(step.Run) {
 				continue
 			}
 			installs = append(installs, lifecycleInstall{step: step, index: i, ecosystem: "npm", command: matchedCommand(step.Run, npmInstallPattern)})
 			continue
 		}
 		if yarnInstallPattern.MatchString(step.Run) && !strings.Contains(strings.ToLower(step.Run), "yarn npm publish") {
-			if installScriptsSuppressed(wf, step, job, "yarn") {
+			if installScriptsSuppressed(wf, step, job, "yarn") || isToolingSelfUpdate(step.Run) {
 				continue
 			}
 			installs = append(installs, lifecycleInstall{step: step, index: i, ecosystem: "yarn", command: matchedCommand(step.Run, yarnInstallPattern)})
 			continue
 		}
 		if pnpmInstallPattern.MatchString(step.Run) {
-			if installScriptsSuppressed(wf, step, job, "pnpm") {
+			if installScriptsSuppressed(wf, step, job, "pnpm") || isToolingSelfUpdate(step.Run) {
 				continue
 			}
 			installs = append(installs, lifecycleInstall{step: step, index: i, ecosystem: "pnpm", command: matchedCommand(step.Run, pnpmInstallPattern)})

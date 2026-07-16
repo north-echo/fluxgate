@@ -919,6 +919,36 @@ jobs:
 	}
 }
 
+// A global self-update of the npm CLI (`npm install -g npm@11`) installs no
+// project dependencies and runs no project lifecycle scripts, so it cannot
+// harvest the publish token — must not be flagged as a lifecycle install.
+func TestCheckLifecycleInstallBeforeCredentialedOperation_ToolingSelfUpdate(t *testing.T) {
+	wf, err := ParseWorkflowFile("../../test/fixtures/lifecycle-npm-selfupdate.yaml")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	findings := CheckLifecycleInstallBeforeCredentialedOperation(wf)
+	if len(findings) != 0 {
+		t.Fatalf("expected 0 findings for npm tooling self-update, got %d: %v", len(findings), findings)
+	}
+}
+
+// A tooling self-update alongside a real project install (`npm ci`) still runs
+// untrusted dependency scripts — the finding must fire.
+func TestCheckLifecycleInstallBeforeCredentialedOperation_SelfUpdatePlusDeps(t *testing.T) {
+	wf, err := ParseWorkflowFile("../../test/fixtures/lifecycle-npm-selfupdate-plus-deps.yaml")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	findings := CheckLifecycleInstallBeforeCredentialedOperation(wf)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding when a project install accompanies the self-update, got %d: %v", len(findings), findings)
+	}
+	if findings[0].RuleID != "FG-026" {
+		t.Errorf("expected FG-026, got %s", findings[0].RuleID)
+	}
+}
+
 // --- AllRules completeness ---
 
 func TestAllRules_IncludesNewRules(t *testing.T) {
