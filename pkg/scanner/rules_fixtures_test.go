@@ -144,6 +144,20 @@ func TestCheckScriptInjection_Safe(t *testing.T) {
 	}
 }
 
+// FG-001 must downgrade to info when the executing job has empty permissions
+// (no GITHUB_TOKEN) and references no secrets — fork code runs but there is
+// nothing to exfiltrate. Regression for ionos-cloud/cluster-api-provider-proxmox.
+func TestCheckPwnRequest_NoTokenExec(t *testing.T) {
+	wf := loadFixture(t, "pwn-request-no-token.yaml")
+	findings := CheckPwnRequest(wf)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 FG-001 finding, got %d: %v", len(findings), findings)
+	}
+	if findings[0].Severity != SeverityInfo {
+		t.Errorf("expected info severity for no-token/no-secret exec job, got %s", findings[0].Severity)
+	}
+}
+
 // Attacker-controllable expressions (PR title on pull_request_target, used in a
 // non-echo command) must stay high — the dispatch-input downgrade must not touch them.
 func TestCheckScriptInjection_PRTitleStaysHigh(t *testing.T) {
@@ -1174,6 +1188,20 @@ func TestCheckLocalActionUntrustedCheckout_RunCheckout(t *testing.T) {
 	}
 	if findings[0].Severity != SeverityCritical {
 		t.Errorf("expected critical severity, got %s", findings[0].Severity)
+	}
+}
+
+// FG-016 must downgrade to info when the job restricts execution to trusted
+// authors (MEMBER/OWNER/COLLABORATOR via the contains(fromJSON([...])) idiom) —
+// an external fork can't reach the local action. Regression for redwoodjs/agent-ci.
+func TestCheckLocalActionUntrustedCheckout_AuthorGuarded(t *testing.T) {
+	wf := loadFixture(t, "local-action-author-guarded.yaml")
+	findings := CheckLocalActionUntrustedCheckout(wf)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 FG-016 finding, got %d: %v", len(findings), findings)
+	}
+	if findings[0].Severity != SeverityInfo {
+		t.Errorf("expected info severity for author-association-guarded job, got %s", findings[0].Severity)
 	}
 }
 

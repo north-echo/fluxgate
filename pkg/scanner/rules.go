@@ -29,6 +29,7 @@ type MitigationAnalysis struct {
 	TrustedRefIsolated  bool // Fork checkout to subdir, all executed code from trusted ref
 	PermissionGateJob   bool // Upstream job verifies collaborator permissions via API
 	BuildBeforeCheckout bool // Binary compiled from base branch BEFORE PR code checkout
+	NoCredentialExec    bool // Executing job has empty permissions (no token) AND references no secrets
 	Details             []string
 }
 
@@ -195,6 +196,15 @@ func CheckPwnRequest(wf *Workflow) []Finding {
 			mitigated = true
 			mitigation.Details = append(mitigation.Details, fmt.Sprintf(
 				"pathspec-checkout isolation: fork content limited to '%s/', executed scripts from trusted ref", runPathspec))
+		}
+
+		// No-credential execution: the executing job has empty permissions (no
+		// GITHUB_TOKEN) and references no secrets — fork code runs but there is
+		// nothing to exfiltrate, so it isn't a secret-stealing pwn request.
+		if mitigation.NoCredentialExec {
+			severity = SeverityInfo
+			confidence = ConfidencePatternOnly
+			mitigated = true
 		}
 
 		// Permission gate job: upstream job verifies collaborator access — internal threat only
@@ -1040,7 +1050,28 @@ func analyzeMitigations(wf *Workflow, job Job, checkoutIdx int, postCheckoutStep
 		m.Details = append(m.Details, "build-before-checkout: binary compiled from base branch before PR checkout")
 	}
 
+	// 11. No-credential execution: the job running fork code has empty permissions
+	// (no GITHUB_TOKEN) AND references no secrets. Fork code still executes, but
+	// there is no token or secret to steal — so this is not a secret-exfil pwn
+	// request. (Self-hosted-runner host risk, if any, is covered by FG-009.)
+	if jobHasNoToken(wf, job) && !postCheckoutAccessesSecrets(postCheckoutSteps) {
+		m.NoCredentialExec = true
+		m.Details = append(m.Details, "executing job has empty permissions (no GITHUB_TOKEN) and references no secrets")
+	}
+
 	return m
+}
+
+// jobHasNoToken reports whether the effective permissions of the job (its own
+// block, or the workflow-level block if the job doesn't set one) explicitly
+// grant no token access — i.e. `permissions: {}`. This removes the GITHUB_TOKEN
+// entirely, so fork code cannot abuse it.
+func jobHasNoToken(wf *Workflow, job Job) bool {
+	perm := job.Permissions
+	if !perm.Set {
+		perm = wf.Permissions
+	}
+	return perm.Set && !perm.WriteAll && !perm.ReadAll && len(perm.Scopes) == 0
 }
 
 // detectBuildBeforeCheckout detects the defense-in-depth pattern where a binary
@@ -2585,17 +2616,29 @@ func CheckLocalActionUntrustedCheckout(wf *Workflow) []Finding {
 			continue
 		}
 
+		// Author-association / fork guard: if the job restricts execution to
+		// trusted authors (MEMBER/OWNER/COLLABORATOR) or excludes forks, an
+		// arbitrary fork PR cannot reach the local action. Downgrade to info
+		// (residual: a maintainer-applied label plus a synchronize TOCTOU could
+		// still run, but not an unauthenticated external fork).
+		severity := SeverityCritical
+		guardNote := ""
+		if hasAuthorAssociationGuard(job) || containsForkGuard(job.If) {
+			severity = SeverityInfo
+			guardNote = " (mitigated: job restricts execution to trusted authors / non-forks)"
+		}
+
 		for _, step := range job.Steps[checkoutIdx+1:] {
 			if strings.HasPrefix(step.Uses, "./") {
 				findings = append(findings, Finding{
 					RuleID:   "FG-016",
-					Severity: SeverityCritical,
+					Severity: severity,
 					File:     wf.Path,
 					Line:     step.Line,
 					Message: fmt.Sprintf(
 						"Local Action After Untrusted Checkout: job '%s' uses local action '%s' "+
-							"after checking out fork code — attacker controls action.yml",
-						jobName, step.Uses),
+							"after checking out fork code — attacker controls action.yml%s",
+						jobName, step.Uses, guardNote),
 					Details: "Local composite actions (uses: ./) are loaded from the checked-out " +
 						"code. When preceded by a checkout of fork/PR head code, the attacker controls " +
 						"the entire action definition including action.yml, scripts, and Dockerfiles. " +
@@ -4316,6 +4359,14 @@ func hasAuthorAssociationGuard(job Job) bool {
 		if strings.Contains(g, "author_association=='"+role+"'") ||
 			strings.Contains(g, `author_association=="`+role+`"`) {
 			return true
+		}
+	}
+	// Allowlist idiom: contains(fromJSON('["MEMBER","OWNER","COLLABORATOR"]'), author_association)
+	if strings.Contains(g, "fromjson") {
+		for _, role := range []string{"'member'", "'owner'", "'collaborator'", `"member"`, `"owner"`, `"collaborator"`} {
+			if strings.Contains(g, role) {
+				return true
+			}
 		}
 	}
 	return false
