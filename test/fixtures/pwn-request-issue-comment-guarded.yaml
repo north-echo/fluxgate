@@ -1,0 +1,19 @@
+name: PR Command Guarded
+on:
+  issue_comment:
+    types: [created]
+jobs:
+  run-command:
+    if: >
+      github.event.issue.pull_request &&
+      contains(github.event.comment.body, '/test') &&
+      (github.event.comment.author_association == 'OWNER' ||
+       github.event.comment.author_association == 'MEMBER' ||
+       github.event.comment.author_association == 'COLLABORATOR')
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh pr checkout ${{ github.event.issue.number }}
+      - run: npm install

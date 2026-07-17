@@ -17,20 +17,21 @@ type ExecutionAnalysis struct {
 
 // MitigationAnalysis captures defensive controls detected on a workflow/job.
 type MitigationAnalysis struct {
-	LabelGated          bool
-	EnvironmentGated    bool
-	MaintainerCheck     bool
-	ForkGuard           bool
-	ActorGuard          bool // Job if: restricts execution to specific bot actor(s)
-	ActorGuardHuman     bool // Job if: restricts to specific human actor(s) (weaker)
-	NeedsGate           bool // Job depends on upstream job with environment/fork gate
-	TokenBlanked        bool
-	PathIsolated        bool // Fork code checked out to subdirectory, no direct execution
-	TrustedRefIsolated  bool // Fork checkout to subdir, all executed code from trusted ref
-	PermissionGateJob   bool // Upstream job verifies collaborator permissions via API
-	BuildBeforeCheckout bool // Binary compiled from base branch BEFORE PR code checkout
-	NoCredentialExec    bool // Executing job has empty permissions (no token) AND references no secrets
-	Details             []string
+	LabelGated            bool
+	EnvironmentGated      bool
+	MaintainerCheck       bool
+	ForkGuard             bool
+	ActorGuard            bool // Job if: restricts execution to specific bot actor(s)
+	ActorGuardHuman       bool // Job if: restricts to specific human actor(s) (weaker)
+	NeedsGate             bool // Job depends on upstream job with environment/fork gate
+	TokenBlanked          bool
+	PathIsolated          bool // Fork code checked out to subdirectory, no direct execution
+	TrustedRefIsolated    bool // Fork checkout to subdir, all executed code from trusted ref
+	PermissionGateJob     bool // Upstream job verifies collaborator permissions via API
+	BuildBeforeCheckout   bool // Binary compiled from base branch BEFORE PR code checkout
+	NoCredentialExec      bool // Executing job has empty permissions (no token) AND references no secrets
+	AuthorAssociationGate bool // Job if: restricts execution by author_association (trusted commenters/contributors)
+	Details               []string
 }
 
 // Build tools that definitely execute code from the working directory.
@@ -85,11 +86,22 @@ var readOnlyCommands = []string{
 	"echo", "printf",
 }
 
-// CheckPwnRequest detects pull_request_target workflows that checkout PR head
-// code with post-checkout execution analysis (FG-001).
+// CheckPwnRequest detects pull_request_target and issue_comment workflows that
+// checkout PR head code with post-checkout execution analysis (FG-001). Both are
+// privileged triggers: issue_comment ChatOps bots (e.g. `gh pr checkout
+// ${{ github.event.issue.number }}` on a `/command`) run fork code in the base
+// context just like pull_request_target.
 func CheckPwnRequest(wf *Workflow) []Finding {
-	if !wf.On.PullRequestTarget {
+	if !wf.On.PullRequestTarget && !wf.On.IssueComment {
 		return nil
+	}
+
+	triggerLabel := "pull_request_target"
+	switch {
+	case wf.On.PullRequestTarget && wf.On.IssueComment:
+		triggerLabel = "pull_request_target/issue_comment"
+	case wf.On.IssueComment:
+		triggerLabel = "issue_comment"
 	}
 
 	var findings []Finding
@@ -213,13 +225,20 @@ func CheckPwnRequest(wf *Workflow) []Finding {
 			mitigated = true
 		}
 
+		// Author-association gate: only trusted commenters/contributors can
+		// trigger — an arbitrary external commenter can't reach the checkout.
+		if mitigation.AuthorAssociationGate && !mitigated {
+			severity = downgradeBy(severity, 2)
+			mitigated = true
+		}
+
 		// Path isolation adjusts confidence, not severity
 		if mitigation.PathIsolated && confidence == ConfidenceConfirmed {
 			confidence = ConfidencePatternOnly
 			mitigated = true
 		}
 
-		msg := fmt.Sprintf("Pwn Request: pull_request_target with fork checkout [%s]", confidence)
+		msg := fmt.Sprintf("Pwn Request: %s with fork checkout [%s]", triggerLabel, confidence)
 		if execResult.Detail != "" {
 			msg += " — " + execResult.Detail
 		}
@@ -229,8 +248,8 @@ func CheckPwnRequest(wf *Workflow) []Finding {
 
 		permDesc := describePermissions(wf.Permissions, job.Permissions)
 		details := fmt.Sprintf(
-			"Trigger: pull_request_target, Checkout ref: %s, Permissions: %s, Execution: %s",
-			checkoutRef, permDesc, confidence,
+			"Trigger: %s, Checkout ref: %s, Permissions: %s, Execution: %s",
+			triggerLabel, checkoutRef, permDesc, confidence,
 		)
 
 		findings = append(findings, Finding{
@@ -926,6 +945,14 @@ func analyzeMitigations(wf *Workflow, job Job, checkoutIdx int, postCheckoutStep
 		} else if isHuman {
 			m.ActorGuardHuman = true
 			m.Details = append(m.Details, fmt.Sprintf("job if: restricts to specific actor(s) (%s)", truncate(job.If, 80)))
+		}
+		// author_association gate — common on issue_comment ChatOps: only
+		// trusted commenters (MEMBER/OWNER/COLLABORATOR) or known contributors
+		// can trigger. Strong for issue_comment (author is checked at fire time,
+		// no re-run TOCTOU).
+		if hasAuthorAssociationGuard(job) {
+			m.AuthorAssociationGate = true
+			m.Details = append(m.Details, "job if: restricts execution by author_association")
 		}
 	}
 
@@ -1710,6 +1737,9 @@ func refPointsToPRHead(ref string) bool {
 		"github.event.pull_request.head.sha",
 		"github.event.pull_request.head.ref",
 		"github.head_ref",
+		// issue_comment context: a checkout ref built from the PR number, e.g.
+		// `refs/pull/${{ github.event.issue.number }}/head`.
+		"github.event.issue.number",
 	}
 	for _, d := range dangerous {
 		if strings.Contains(ref, d) {
