@@ -1,0 +1,13 @@
+name: Guarded Local Action
+on:
+  pull_request_target:
+    types: [opened, labeled, synchronize]
+jobs:
+  local-action:
+    if: contains(fromJSON('["MEMBER", "OWNER", "COLLABORATOR"]'), github.event.pull_request.author_association)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: ./.github/actions/smoke
