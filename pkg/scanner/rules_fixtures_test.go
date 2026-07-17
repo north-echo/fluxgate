@@ -144,6 +144,19 @@ func TestCheckScriptInjection_Safe(t *testing.T) {
 	}
 }
 
+// Attacker-controllable expressions (PR title on pull_request_target, used in a
+// non-echo command) must stay high — the dispatch-input downgrade must not touch them.
+func TestCheckScriptInjection_PRTitleStaysHigh(t *testing.T) {
+	wf := loadFixture(t, "script-injection-prtitle.yaml")
+	findings := CheckScriptInjection(wf)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 FG-002 finding, got %d: %v", len(findings), findings)
+	}
+	if findings[0].Severity != SeverityHigh {
+		t.Errorf("expected high severity for pull_request.title injection, got %s", findings[0].Severity)
+	}
+}
+
 func TestCheckTagPinning(t *testing.T) {
 	wf := loadFixture(t, "tag-pinned.yaml")
 	findings := CheckTagPinning(wf)
@@ -167,6 +180,30 @@ func TestCheckTagPinning(t *testing.T) {
 	}
 	if infoCount != 1 {
 		t.Errorf("expected 1 info finding (actions/checkout by tag), got %d", infoCount)
+	}
+}
+
+// Branch-pinned third-party actions (@main) are supply-chain hygiene, not an
+// acute exploit — capped at medium (down from high), with a mutable-branch note.
+// First-party actions/* stay info regardless of ref.
+func TestCheckTagPinning_BranchRefIsMedium(t *testing.T) {
+	wf := loadFixture(t, "tag-pinned-branch.yaml")
+	findings := CheckTagPinning(wf)
+
+	var branchPin *Finding
+	for i := range findings {
+		if strings.Contains(findings[i].Message, "some-org/some-action") {
+			branchPin = &findings[i]
+		}
+	}
+	if branchPin == nil {
+		t.Fatalf("expected a finding for some-org/some-action@main, got %v", findings)
+	}
+	if branchPin.Severity != SeverityMedium {
+		t.Errorf("expected medium severity for third-party branch pin, got %s", branchPin.Severity)
+	}
+	if !strings.Contains(branchPin.Message, "mutable branch ref") {
+		t.Errorf("expected mutable-branch note in message, got: %s", branchPin.Message)
 	}
 }
 
@@ -914,18 +951,22 @@ func TestCheckScriptInjection_DispatchInputs(t *testing.T) {
 	if len(findings) < 2 {
 		t.Fatalf("expected at least 2 injection findings for dispatch inputs, got %d", len(findings))
 	}
-	// At least one should be high (the deploy.sh line), others may be info (echo lines)
-	hasHigh := false
+	// Dispatch/call inputs are write-gated, so the executed (non-echo) deploy.sh
+	// line is medium, not high; the echo lines stay info. Nothing should be high.
+	hasMedium := false
 	for _, f := range findings {
 		if f.RuleID != "FG-002" {
 			t.Errorf("expected FG-002, got %s", f.RuleID)
 		}
 		if f.Severity == SeverityHigh {
-			hasHigh = true
+			t.Errorf("dispatch-input injection should not be high, got high for: %s", f.Message)
+		}
+		if f.Severity == SeverityMedium {
+			hasMedium = true
 		}
 	}
-	if !hasHigh {
-		t.Errorf("expected at least one high severity finding (deploy.sh context)")
+	if !hasMedium {
+		t.Errorf("expected the executed dispatch-input line to be medium")
 	}
 }
 

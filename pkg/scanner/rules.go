@@ -568,6 +568,13 @@ func CheckScriptInjection(wf *Workflow) []Finding {
 					if isGHALoggingOnly(step.Run, expr) {
 						severity = SeverityInfo
 						detail = " (logging only — echo/printf context, not directly exploitable)"
+					} else if isDispatchInputExpr(expr) {
+						// workflow_dispatch/workflow_call inputs are populated only via
+						// a write-gated manual dispatch or an internal caller — never
+						// directly from an untrusted trigger. Real injection, but low
+						// external reach; drop a tier from high.
+						severity = SeverityMedium
+						detail = " (workflow_dispatch/workflow_call input — requires trigger access; verify reusable-workflow callers don't forward untrusted data)"
 					}
 
 					findings = append(findings, Finding{
@@ -609,6 +616,14 @@ func isGHALoggingOnly(run string, expr string) bool {
 	return true
 }
 
+// isDispatchInputExpr reports whether a dangerous expression is a
+// workflow_dispatch / workflow_call input. These contexts are only populated by
+// a manual dispatch (which requires write access) or an internal caller, so the
+// injection is not reachable from an untrusted trigger.
+func isDispatchInputExpr(expr string) bool {
+	return expr == "inputs." || expr == "github.event.inputs."
+}
+
 var shaPattern = regexp.MustCompile(`^[a-f0-9]{40}$`)
 
 // CheckTagPinning detects third-party actions referenced by tag instead of
@@ -628,9 +643,15 @@ func CheckTagPinning(wf *Workflow) []Finding {
 				continue // SHA-pinned, safe
 			}
 
+			// Supply-chain hygiene, not an acute exploit: a moving ref lets the
+			// action change under you, but nothing is directly exploitable today.
+			// Cap at medium. Branch refs (main/master/dev) move on every push and
+			// are worse than a version tag, so they keep the ceiling and a note;
+			// first-party actions/* are GitHub-controlled and stay info.
 			severity := SeverityMedium
+			note := ""
 			if ref == "main" || ref == "master" || ref == "dev" {
-				severity = SeverityHigh
+				note = " — mutable branch ref"
 			}
 			if strings.HasPrefix(action, "actions/") {
 				severity = SeverityInfo
@@ -641,7 +662,7 @@ func CheckTagPinning(wf *Workflow) []Finding {
 				Severity: severity,
 				File:     wf.Path,
 				Line:     step.Line,
-				Message:  fmt.Sprintf("Tag Pinning: %s@%s (use SHA instead)", action, ref),
+				Message:  fmt.Sprintf("Tag Pinning: %s@%s (use SHA instead)%s", action, ref, note),
 			})
 		}
 	}
