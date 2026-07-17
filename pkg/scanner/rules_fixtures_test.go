@@ -144,6 +144,40 @@ func TestCheckScriptInjection_Safe(t *testing.T) {
 	}
 }
 
+// FG-001 must now cover issue_comment ChatOps: an ungated `/command` job that
+// `gh pr checkout`s the PR and runs it is a pwn request, same as pull_request_target.
+func TestCheckPwnRequest_IssueComment(t *testing.T) {
+	wf := loadFixture(t, "pwn-request-issue-comment.yaml")
+	findings := CheckPwnRequest(wf)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 FG-001 finding for issue_comment ChatOps, got %d: %v", len(findings), findings)
+	}
+	f := findings[0]
+	if f.Severity != SeverityCritical {
+		t.Errorf("expected critical for ungated issue_comment checkout+exec, got %s", f.Severity)
+	}
+	if !strings.Contains(f.Message, "issue_comment") {
+		t.Errorf("expected issue_comment in message, got: %s", f.Message)
+	}
+}
+
+// The same ChatOps gated by an author_association allowlist (only trusted
+// commenters can trigger) must be downgraded and marked mitigated.
+func TestCheckPwnRequest_IssueCommentAuthorGuarded(t *testing.T) {
+	wf := loadFixture(t, "pwn-request-issue-comment-guarded.yaml")
+	findings := CheckPwnRequest(wf)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 FG-001 finding, got %d: %v", len(findings), findings)
+	}
+	f := findings[0]
+	if f.Severity == SeverityCritical || f.Severity == SeverityHigh {
+		t.Errorf("expected downgraded severity for author-association-gated ChatOps, got %s", f.Severity)
+	}
+	if !strings.Contains(f.Message, "mitigated") {
+		t.Errorf("expected mitigated note, got: %s", f.Message)
+	}
+}
+
 // FG-001 must downgrade to info when the executing job has empty permissions
 // (no GITHUB_TOKEN) and references no secrets — fork code runs but there is
 // nothing to exfiltrate. Regression for ionos-cloud/cluster-api-provider-proxmox.
