@@ -30,6 +30,7 @@ type MitigationAnalysis struct {
 	PermissionGateJob     bool // Upstream job verifies collaborator permissions via API
 	BuildBeforeCheckout   bool // Binary compiled from base branch BEFORE PR code checkout
 	NoCredentialExec      bool // Executing job has empty permissions (no token) AND references no secrets
+	ReadOnlyToken         bool // Executing job has a read-only token AND references no secrets
 	AuthorAssociationGate bool // Job if: restricts execution by author_association (trusted commenters/contributors)
 	Details               []string
 }
@@ -223,6 +224,13 @@ func CheckPwnRequest(wf *Workflow) []Finding {
 		if mitigation.NoCredentialExec {
 			severity = SeverityInfo
 			confidence = ConfidencePatternOnly
+			mitigated = true
+		} else if mitigation.ReadOnlyToken && !mitigated {
+			// Read-only token + no secrets: fork code runs but the token can't
+			// write and there's nothing to steal. Cap at low.
+			if severityRank(severity) < severityRank(SeverityLow) {
+				severity = SeverityLow
+			}
 			mitigated = true
 		}
 
@@ -1093,21 +1101,55 @@ func analyzeMitigations(wf *Workflow, job Job, checkoutIdx int, postCheckoutStep
 	if jobHasNoToken(wf, job) && !postCheckoutAccessesSecrets(postCheckoutSteps) {
 		m.NoCredentialExec = true
 		m.Details = append(m.Details, "executing job has empty permissions (no GITHUB_TOKEN) and references no secrets")
+	} else if jobHasReadOnlyToken(wf, job) && !postCheckoutAccessesSecrets(postCheckoutSteps) {
+		// Read-only token (`read-all` or all-`read` scopes) + no secrets: fork
+		// code runs but the token can't push/comment and there is nothing to
+		// exfiltrate. Not full suppression (a token + runner still exist, and a
+		// private-repo read token has some value), but a strong downgrade.
+		m.ReadOnlyToken = true
+		m.Details = append(m.Details, "executing job has a read-only token and references no secrets")
 	}
 
 	return m
 }
 
-// jobHasNoToken reports whether the effective permissions of the job (its own
-// block, or the workflow-level block if the job doesn't set one) explicitly
-// grant no token access — i.e. `permissions: {}`. This removes the GITHUB_TOKEN
-// entirely, so fork code cannot abuse it.
-func jobHasNoToken(wf *Workflow, job Job) bool {
-	perm := job.Permissions
-	if !perm.Set {
-		perm = wf.Permissions
+// jobEffectivePermissions returns the job's own permissions block, or the
+// workflow-level block if the job doesn't set one.
+func jobEffectivePermissions(wf *Workflow, job Job) PermissionsConfig {
+	if job.Permissions.Set {
+		return job.Permissions
 	}
+	return wf.Permissions
+}
+
+// jobHasNoToken reports whether the job's effective permissions are `{}` — no
+// token at all.
+func jobHasNoToken(wf *Workflow, job Job) bool {
+	perm := jobEffectivePermissions(wf, job)
 	return perm.Set && !perm.WriteAll && !perm.ReadAll && len(perm.Scopes) == 0
+}
+
+// jobHasReadOnlyToken reports whether the job's effective GITHUB_TOKEN is
+// read-only: `read-all`, or an explicit scope block where every scope is
+// `read`/`none` (and at least one scope is set). Excludes the empty `{}` case
+// (that's jobHasNoToken).
+func jobHasReadOnlyToken(wf *Workflow, job Job) bool {
+	perm := jobEffectivePermissions(wf, job)
+	if !perm.Set || perm.WriteAll {
+		return false
+	}
+	if perm.ReadAll {
+		return true
+	}
+	if len(perm.Scopes) == 0 {
+		return false // permissions: {} — handled by jobHasNoToken
+	}
+	for _, v := range perm.Scopes {
+		if v != "read" && v != "none" {
+			return false
+		}
+	}
+	return true
 }
 
 // detectBuildBeforeCheckout detects the defense-in-depth pattern where a binary
@@ -1145,20 +1187,26 @@ func detectBuildBeforeCheckout(steps []Step, prCheckoutIdx int) bool {
 }
 
 // downgradeBy reduces severity by N levels on the severity ladder.
-func downgradeBy(severity string, levels int) string {
-	order := []string{SeverityCritical, SeverityHigh, SeverityMedium, SeverityLow, SeverityInfo}
-	idx := 0
-	for i, s := range order {
+var severityOrder = []string{SeverityCritical, SeverityHigh, SeverityMedium, SeverityLow, SeverityInfo}
+
+// severityRank returns the index of a severity in severityOrder (0 = critical,
+// higher = less severe). Unknown severities rank as most severe (0).
+func severityRank(severity string) int {
+	for i, s := range severityOrder {
 		if s == severity {
-			idx = i
-			break
+			return i
 		}
 	}
+	return 0
+}
+
+func downgradeBy(severity string, levels int) string {
+	idx := severityRank(severity)
 	idx += levels
-	if idx >= len(order) {
-		idx = len(order) - 1
+	if idx >= len(severityOrder) {
+		idx = len(severityOrder) - 1
 	}
-	return order[idx]
+	return severityOrder[idx]
 }
 
 // containsOnly checks if a slice contains only the specified allowed values.
@@ -2640,11 +2688,18 @@ func CheckCurlPipeBash(wf *Workflow) []Finding {
 // action definition comes from trusted code, not the fork.
 func localActionUnderTrustedCheckout(job Job, uses string) bool {
 	p := strings.TrimPrefix(uses, "./")
-	seg := p
-	if i := strings.Index(p, "/"); i != -1 {
-		seg = p[:i]
+	// A parent-relative path (`./../<dir>/...`) points at a sibling checkout dir;
+	// take the first non-".."/"." segment as the checkout path (e.g.
+	// `./../cilium-base-branch/.github/actions/cosign` -> `cilium-base-branch`).
+	seg := ""
+	for _, s := range strings.Split(p, "/") {
+		if s == "" || s == "." || s == ".." {
+			continue
+		}
+		seg = s
+		break
 	}
-	if seg == "" || seg == "." {
+	if seg == "" {
 		return false
 	}
 	for _, step := range job.Steps {
