@@ -1,0 +1,13 @@
+name: Process Build
+on:
+  workflow_run:
+    workflows: ["Build"]
+    types: [completed]
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - run: npm install
