@@ -1656,6 +1656,13 @@ func isTrustedRef(ref string) bool {
 	if strings.Contains(lower, "pull_request.base.") {
 		return true
 	}
+	// github.workflow_sha = the commit of the workflow file (the base/trusted ref
+	// on pull_request_target), and github.sha = the base commit on
+	// pull_request_target. Both check out trusted code, unlike ...head.sha (fork).
+	// "github.sha" does not appear as a substring of "...head.sha", so this is safe.
+	if strings.Contains(lower, "workflow_sha") || strings.Contains(lower, "github.sha") {
+		return true
+	}
 	return false
 }
 
@@ -2610,6 +2617,30 @@ func CheckCurlPipeBash(wf *Workflow) []Finding {
 	return findings
 }
 
+// localActionUnderTrustedCheckout reports whether a `uses: ./<dir>/...` local
+// action resolves to a directory that a checkout of a trusted ref populated
+// (e.g. `actions/checkout` at `github.workflow_sha` into `path: <dir>`), so the
+// action definition comes from trusted code, not the fork.
+func localActionUnderTrustedCheckout(job Job, uses string) bool {
+	p := strings.TrimPrefix(uses, "./")
+	seg := p
+	if i := strings.Index(p, "/"); i != -1 {
+		seg = p[:i]
+	}
+	if seg == "" || seg == "." {
+		return false
+	}
+	for _, step := range job.Steps {
+		if !isCheckoutAction(step.Uses) {
+			continue
+		}
+		if normalizePathspec(step.With["path"]) == seg && isTrustedRef(step.With["ref"]) {
+			return true
+		}
+	}
+	return false
+}
+
 // CheckLocalActionUntrustedCheckout detects local action usage after fork checkout (FG-016).
 func CheckLocalActionUntrustedCheckout(wf *Workflow) []Finding {
 	if !wf.On.PullRequestTarget && !wf.On.IssueComment && !wf.On.WorkflowRun {
@@ -2660,6 +2691,12 @@ func CheckLocalActionUntrustedCheckout(wf *Workflow) []Finding {
 
 		for _, step := range job.Steps[checkoutIdx+1:] {
 			if strings.HasPrefix(step.Uses, "./") {
+				// The local action lives under a subdir populated by a checkout of
+				// a trusted ref (e.g. actions checked out at github.workflow_sha
+				// into path/), so its definition is not attacker-controlled.
+				if localActionUnderTrustedCheckout(job, step.Uses) {
+					continue
+				}
 				findings = append(findings, Finding{
 					RuleID:   "FG-016",
 					Severity: severity,

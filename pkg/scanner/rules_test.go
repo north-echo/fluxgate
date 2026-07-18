@@ -949,6 +949,29 @@ func TestCheckLifecycleInstallBeforeCredentialedOperation_SelfUpdatePlusDeps(t *
 	}
 }
 
+func TestIsTrustedRef(t *testing.T) {
+	trusted := []string{
+		"main", "master", "${{ github.base_ref }}",
+		"${{ github.event.pull_request.base.sha }}",
+		"${{ github.workflow_sha }}", "${{ github.sha }}",
+	}
+	for _, r := range trusted {
+		if !isTrustedRef(r) {
+			t.Errorf("expected %q to be trusted", r)
+		}
+	}
+	untrusted := []string{
+		"${{ github.event.pull_request.head.sha }}",
+		"${{ github.event.pull_request.head.ref }}",
+		"${{ github.head_ref }}",
+	}
+	for _, r := range untrusted {
+		if isTrustedRef(r) {
+			t.Errorf("expected %q to NOT be trusted (fork head)", r)
+		}
+	}
+}
+
 // --- AllRules completeness ---
 
 func TestAllRules_IncludesNewRules(t *testing.T) {
