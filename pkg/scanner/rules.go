@@ -1201,15 +1201,20 @@ func containsForkGuard(ifExpr string) bool {
 		"github.event.pull_request.head.repo.full_name == github.repository",
 		"github.event.pull_request.head.repo.fork == false",
 		"github.event.pull_request.head.repo.fork != true",
+		// workflow_run fork guard: only proceed when the triggering run came from
+		// the base repo (internal), not a fork.
+		"workflow_run.head_repository.full_name == github.repository",
 	}
 	for _, p := range forkGuardPatterns {
 		if strings.Contains(ifExpr, p) {
 			return true
 		}
 	}
-	if strings.Contains(ifExpr, "head.repo.full_name") {
-		idx := strings.Index(ifExpr, "head.repo.full_name")
-		if idx >= 0 {
+	// pull_request uses `head.repo.full_name`; workflow_run uses
+	// `head_repository.full_name`. Either compared with == (and not !=) to
+	// github.repository is a fork guard.
+	for _, key := range []string{"head.repo.full_name", "head_repository.full_name"} {
+		if idx := strings.Index(ifExpr, key); idx >= 0 {
 			surrounding := ifExpr[idx:]
 			if strings.Contains(surrounding, "==") && !strings.Contains(surrounding, "!=") {
 				return true
