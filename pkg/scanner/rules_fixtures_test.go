@@ -54,11 +54,11 @@ func TestCheckPwnRequest_NpmInstall(t *testing.T) {
 		t.Fatalf("expected 1 finding, got %d", len(findings))
 	}
 	f := findings[0]
-	if f.Severity != SeverityCritical {
-		t.Errorf("expected critical severity, got %s", f.Severity)
-	}
-	if f.Confidence != ConfidenceConfirmed {
-		t.Errorf("expected confirmed confidence, got %s", f.Confidence)
+	// Fixture has `permissions: contents: read` (read-only) and no secrets, so
+	// the read-only-token mitigation caps this at low: fork code runs but the
+	// token can't write and there's nothing to exfiltrate.
+	if f.Severity != SeverityLow {
+		t.Errorf("expected low severity (read-only token, no secrets), got %s", f.Severity)
 	}
 }
 

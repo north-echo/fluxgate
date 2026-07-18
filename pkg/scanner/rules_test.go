@@ -972,6 +972,32 @@ func TestIsTrustedRef(t *testing.T) {
 	}
 }
 
+func TestJobTokenClassification(t *testing.T) {
+	wf := &Workflow{}
+	mk := func(p PermissionsConfig) Job { return Job{Permissions: p} }
+
+	// read-all → read-only, not no-token
+	ra := mk(PermissionsConfig{Set: true, ReadAll: true})
+	if !jobHasReadOnlyToken(wf, ra) || jobHasNoToken(wf, ra) {
+		t.Error("read-all should be read-only, not no-token")
+	}
+	// {} → no-token
+	empty := mk(PermissionsConfig{Set: true})
+	if !jobHasNoToken(wf, empty) || jobHasReadOnlyToken(wf, empty) {
+		t.Error("empty permissions should be no-token")
+	}
+	// contents: read → read-only
+	ro := mk(PermissionsConfig{Set: true, Scopes: map[string]string{"contents": "read"}})
+	if !jobHasReadOnlyToken(wf, ro) {
+		t.Error("all-read scopes should be read-only")
+	}
+	// contents: write → neither
+	rw := mk(PermissionsConfig{Set: true, Scopes: map[string]string{"contents": "write"}})
+	if jobHasReadOnlyToken(wf, rw) || jobHasNoToken(wf, rw) {
+		t.Error("a write scope should be neither read-only nor no-token")
+	}
+}
+
 // --- AllRules completeness ---
 
 func TestAllRules_IncludesNewRules(t *testing.T) {
