@@ -1201,6 +1201,17 @@ func TestCheckLocalActionUntrustedCheckout_TrustedRefIsolated(t *testing.T) {
 	}
 }
 
+// A local action loaded from a subdir populated by a checkout of the trusted
+// github.workflow_sha (not the fork) is not attacker-controlled. Regression for
+// leanprover-community/mathlib4's PR_summary.yml.
+func TestCheckLocalActionUntrustedCheckout_WorkflowShaDir(t *testing.T) {
+	wf := loadFixture(t, "local-action-workflow-sha.yaml")
+	findings := CheckLocalActionUntrustedCheckout(wf)
+	if len(findings) != 0 {
+		t.Fatalf("expected 0 findings for local action under trusted workflow_sha checkout, got %d: %v", len(findings), findings)
+	}
+}
+
 // A run block that fetches the PR head to a named ref but never checks it out
 // leaves fork code off the working tree; a local action loaded afterward comes
 // from the base clone, not the fork. No FG-016 finding.
