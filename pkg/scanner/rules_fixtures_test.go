@@ -223,6 +223,26 @@ func TestCheckPwnRequest_NoTokenExec(t *testing.T) {
 	}
 }
 
+// FG-001 must downgrade one level when the executing job is bound to a
+// deployment environment (which may require reviewer approval before a fork PR
+// runs). The environment fixture has id-token:write (not read-only), so the
+// baseline is critical and the env gate drops it to high. Regression for
+// cilium/cilium build-images-base.yaml.
+func TestCheckPwnRequest_EnvironmentGated(t *testing.T) {
+	wf := loadFixture(t, "oidc-prt-environment-gated.yaml")
+	findings := CheckPwnRequest(wf)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 FG-001 finding, got %d: %v", len(findings), findings)
+	}
+	f := findings[0]
+	if f.Severity != SeverityHigh {
+		t.Errorf("expected high severity (critical downgraded by environment gate), got %s", f.Severity)
+	}
+	if !strings.Contains(f.Message, "environment") {
+		t.Errorf("expected environment mitigation note, got: %s", f.Message)
+	}
+}
+
 // Attacker-controllable expressions (PR title on pull_request_target, used in a
 // non-echo command) must stay high — the dispatch-input downgrade must not touch them.
 func TestCheckScriptInjection_PRTitleStaysHigh(t *testing.T) {
@@ -684,6 +704,25 @@ func TestCheckOIDC_PushOnly(t *testing.T) {
 	}
 	if findings[0].Severity != SeverityInfo {
 		t.Errorf("expected info for push-only OIDC, got %s", findings[0].Severity)
+	}
+}
+
+// A PRT job with id-token:write + fork checkout that is bound to a deployment
+// environment downgrades one level (critical -> high): the environment may carry
+// required-reviewer protection gating the OIDC request behind manual approval.
+// Regression for cilium/cilium build-images-base.yaml.
+func TestCheckOIDC_EnvironmentGated(t *testing.T) {
+	wf := loadFixture(t, "oidc-prt-environment-gated.yaml")
+	findings := CheckOIDCMisconfiguration(wf)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(findings))
+	}
+	if findings[0].Severity != SeverityHigh {
+		t.Errorf("expected high (PRT + fork checkout downgraded by environment gate), got %s", findings[0].Severity)
+	}
+	if !strings.Contains(findings[0].Message, "environment") {
+		t.Error("expected message to mention the environment gate")
 	}
 }
 
@@ -1281,6 +1320,33 @@ func TestCheckLocalActionUntrustedCheckout_AuthorGuarded(t *testing.T) {
 	}
 	if findings[0].Severity != SeverityInfo {
 		t.Errorf("expected info severity for author-association-guarded job, got %s", findings[0].Severity)
+	}
+}
+
+// FG-016 must downgrade to info when the executing job has a read-only token
+// (permissions: read-all) and references no secrets — fork code runs but the
+// token can't write and there is nothing to exfiltrate (normal pull_request CI).
+// Regression for cilium/cilium lint-build-commits.yaml.
+func TestCheckLocalActionUntrustedCheckout_ReadOnlyToken(t *testing.T) {
+	wf := loadFixture(t, "local-action-readonly-token.yaml")
+	findings := CheckLocalActionUntrustedCheckout(wf)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 FG-016 finding, got %d: %v", len(findings), findings)
+	}
+	if findings[0].Severity != SeverityInfo {
+		t.Errorf("expected info severity for read-only-token job, got %s", findings[0].Severity)
+	}
+}
+
+// FG-016 must not fire when the local action lives in a parent-escaping sibling
+// dir (`./../base-branch/...`) that a run step staged from trusted code BEFORE
+// the untrusted checkout — actions/checkout can't write to a `..`-escaping path,
+// so its contents are trusted. Regression for cilium/cilium build-images-base.yaml.
+func TestCheckLocalActionUntrustedCheckout_StagedSiblingDir(t *testing.T) {
+	wf := loadFixture(t, "local-action-staged-sibling-dir.yaml")
+	findings := CheckLocalActionUntrustedCheckout(wf)
+	if len(findings) != 0 {
+		t.Fatalf("expected 0 findings for trusted staged sibling-dir action, got %d: %v", len(findings), findings)
 	}
 }
 
