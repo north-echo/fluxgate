@@ -161,6 +161,20 @@ func TestCheckPwnRequest_WorkflowRun(t *testing.T) {
 	}
 }
 
+// The standard workflow_run fork guard (head_repository.full_name ==
+// github.repository) restricts to internal triggering runs, so fork artifacts/
+// code can't reach it → downgrade. Regression for duobaseio/forui.
+func TestCheckPwnRequest_WorkflowRunForkGuarded(t *testing.T) {
+	wf := loadFixture(t, "pwn-request-workflow-run-guarded.yaml")
+	findings := CheckPwnRequest(wf)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 FG-001 finding, got %d: %v", len(findings), findings)
+	}
+	if findings[0].Severity != SeverityInfo {
+		t.Errorf("expected info for workflow_run fork-guarded job, got %s", findings[0].Severity)
+	}
+}
+
 // FG-001 must now cover issue_comment ChatOps: an ungated `/command` job that
 // `gh pr checkout`s the PR and runs it is a pwn request, same as pull_request_target.
 func TestCheckPwnRequest_IssueComment(t *testing.T) {
