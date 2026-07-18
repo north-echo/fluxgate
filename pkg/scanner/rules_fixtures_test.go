@@ -144,6 +144,23 @@ func TestCheckScriptInjection_Safe(t *testing.T) {
 	}
 }
 
+// FG-001 must cover workflow_run: a workflow that checks out the triggering PR's
+// head (github.event.workflow_run.head_sha) and runs it is a pwn request.
+func TestCheckPwnRequest_WorkflowRun(t *testing.T) {
+	wf := loadFixture(t, "pwn-request-workflow-run.yaml")
+	findings := CheckPwnRequest(wf)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 FG-001 finding for workflow_run checkout+exec, got %d: %v", len(findings), findings)
+	}
+	f := findings[0]
+	if f.Severity != SeverityCritical {
+		t.Errorf("expected critical for ungated workflow_run head checkout+exec, got %s", f.Severity)
+	}
+	if !strings.Contains(f.Message, "workflow_run") {
+		t.Errorf("expected workflow_run in message, got: %s", f.Message)
+	}
+}
+
 // FG-001 must now cover issue_comment ChatOps: an ungated `/command` job that
 // `gh pr checkout`s the PR and runs it is a pwn request, same as pull_request_target.
 func TestCheckPwnRequest_IssueComment(t *testing.T) {
@@ -409,8 +426,9 @@ func TestCheckForkPRCodeExec(t *testing.T) {
 	if f.RuleID != "FG-006" {
 		t.Errorf("expected rule FG-006, got %s", f.RuleID)
 	}
-	if f.Severity != SeverityMedium {
-		t.Errorf("expected medium severity (no secrets), got %s", f.Severity)
+	// pull_request fork exec: low (read-only token, no fork secrets, ephemeral runner).
+	if f.Severity != SeverityLow {
+		t.Errorf("expected low severity for pull_request fork exec, got %s", f.Severity)
 	}
 }
 
@@ -422,8 +440,10 @@ func TestCheckForkPRCodeExec_WithSecrets(t *testing.T) {
 		t.Fatalf("expected 1 finding, got %d", len(findings))
 	}
 	f := findings[0]
-	if f.Severity != SeverityHigh {
-		t.Errorf("expected high severity (secrets on build step), got %s", f.Severity)
+	// Even with secret refs, on pull_request those resolve to empty for fork PRs,
+	// so this stays low — the tuning that stops FG-006 over-flagging as high.
+	if f.Severity != SeverityLow {
+		t.Errorf("expected low severity (secrets empty for fork PRs on pull_request), got %s", f.Severity)
 	}
 }
 

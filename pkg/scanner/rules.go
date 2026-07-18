@@ -92,17 +92,24 @@ var readOnlyCommands = []string{
 // ${{ github.event.issue.number }}` on a `/command`) run fork code in the base
 // context just like pull_request_target.
 func CheckPwnRequest(wf *Workflow) []Finding {
-	if !wf.On.PullRequestTarget && !wf.On.IssueComment {
+	if !wf.On.PullRequestTarget && !wf.On.IssueComment && !wf.On.WorkflowRun {
 		return nil
 	}
 
-	triggerLabel := "pull_request_target"
-	switch {
-	case wf.On.PullRequestTarget && wf.On.IssueComment:
-		triggerLabel = "pull_request_target/issue_comment"
-	case wf.On.IssueComment:
-		triggerLabel = "issue_comment"
+	// All three are privileged triggers that run in the base-repo context with
+	// secrets; workflow_run additionally can check out the triggering PR's head
+	// (github.event.workflow_run.head_sha).
+	var trigs []string
+	if wf.On.PullRequestTarget {
+		trigs = append(trigs, "pull_request_target")
 	}
+	if wf.On.IssueComment {
+		trigs = append(trigs, "issue_comment")
+	}
+	if wf.On.WorkflowRun {
+		trigs = append(trigs, "workflow_run")
+	}
+	triggerLabel := strings.Join(trigs, "/")
 
 	var findings []Finding
 	for _, job := range wf.Jobs {
@@ -825,10 +832,12 @@ func CheckForkPRCodeExec(wf *Workflow) []Finding {
 			continue
 		}
 
-		severity := SeverityMedium
-		if postCheckoutAccessesSecrets(postCheckoutSteps) {
-			severity = SeverityHigh
-		}
+		// On `pull_request` (not `_target`), fork PRs run with a read-only token
+		// and NO repository secrets — secret references resolve to empty. So this
+		// is arbitrary code execution on an ephemeral runner with nothing to
+		// steal: low severity. (Self-hosted-runner host risk is FG-009; cache
+		// poisoning is FG-010; secret-bearing pwns are FG-001 on _target.)
+		severity := SeverityLow
 
 		confidence := ConfidenceConfirmed
 		if !execResult.Confirmed {
@@ -844,7 +853,7 @@ func CheckForkPRCodeExec(wf *Workflow) []Finding {
 			File:       wf.Path,
 			Line:       checkoutLine,
 			Message:    msg,
-			Details:    "Trigger: pull_request (read-only token from forks, but arbitrary code execution on runner)",
+			Details:    "Trigger: pull_request — fork PRs get a read-only token and no secrets, so this is code execution on an ephemeral runner with nothing to exfiltrate (cache-poisoning aside).",
 		})
 	}
 	return findings
@@ -1747,6 +1756,9 @@ func refPointsToPRHead(ref string) bool {
 		// issue_comment context: a checkout ref built from the PR number, e.g.
 		// `refs/pull/${{ github.event.issue.number }}/head`.
 		"github.event.issue.number",
+		// workflow_run context: the triggering (fork) PR's head.
+		"github.event.workflow_run.head_sha",
+		"github.event.workflow_run.head_branch",
 	}
 	for _, d := range dangerous {
 		if strings.Contains(ref, d) {
