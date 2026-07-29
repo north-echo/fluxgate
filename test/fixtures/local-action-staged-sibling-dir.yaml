@@ -1,0 +1,31 @@
+name: Base Image Release Build
+# GitHub's recommended pull_request_target hardening: check out the trusted base
+# ref, copy the actions/scripts you intend to run into a directory OUTSIDE the
+# workspace, THEN check out the fork PR head. The `./../base-branch/...` action is
+# staged from trusted code before the untrusted checkout, so it is not attacker-
+# controlled — actions/checkout can't write to a `..`-escaping sibling dir.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout base branch (trusted)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.base_ref }}
+          persist-credentials: false
+      - name: Copy trusted action out of the workspace
+        run: |
+          mkdir -p ../base-branch/.github/actions
+          cp -r .github/actions/cosign ../base-branch/.github/actions/
+      - name: Checkout PR head (NOT TRUSTED)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Sign with trusted (staged) action
+        uses: ./../base-branch/.github/actions/cosign

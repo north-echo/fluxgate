@@ -247,6 +247,19 @@ func CheckPwnRequest(wf *Workflow) []Finding {
 			mitigated = true
 		}
 
+		// Environment gate: the executing job is bound to a deployment
+		// environment, which may carry required-reviewer protection rules — a
+		// fork PR would then pause for manual approval by a trusted team before
+		// any step runs. Protection rules aren't visible in the YAML, so this is
+		// a one-level downgrade, not a suppression (an environment with no rules
+		// gates nothing).
+		if job.Environment != "" && !mitigated {
+			severity = downgradeBy(severity, 1)
+			mitigation.Details = append(mitigation.Details, fmt.Sprintf(
+				"job gated on environment '%s' (may require deployment approval)", job.Environment))
+			mitigated = true
+		}
+
 		// Path isolation adjusts confidence, not severity
 		if mitigation.PathIsolated && confidence == ConfidenceConfirmed {
 			confidence = ConfidencePatternOnly
@@ -2110,6 +2123,19 @@ func CheckOIDCMisconfiguration(wf *Workflow) []Finding {
 				severity = SeverityCritical
 			}
 
+			// Environment gate: a job bound to a deployment environment
+			// (`environment:`) has its secrets AND its execution scoped to that
+			// environment, which may carry required-reviewer protection rules —
+			// in which case a fork PR pauses for manual approval by a trusted team
+			// before any step (or OIDC request) runs. Protection rules aren't
+			// visible in the workflow YAML, so this is a one-level downgrade, not a
+			// suppression (an environment with no rules gates nothing).
+			envNote := ""
+			if job.Environment != "" {
+				severity = downgradeBy(severity, 1)
+				envNote = fmt.Sprintf(" (job gated on environment '%s' — may require deployment approval)", job.Environment)
+			}
+
 			msg := fmt.Sprintf("OIDC Misconfiguration: id-token:write on pull_request_target workflow (job '%s')", jobName)
 			if len(cloudActions) > 0 {
 				msg += fmt.Sprintf(" with cloud auth (%s)", strings.Join(cloudActions, ", "))
@@ -2117,6 +2143,7 @@ func CheckOIDCMisconfiguration(wf *Workflow) []Finding {
 			if checkoutsFork {
 				msg += " — attacker can mint cloud credentials via fork PR"
 			}
+			msg += envNote
 
 			findings = append(findings, Finding{
 				RuleID:   "FG-008",
@@ -2713,6 +2740,47 @@ func localActionUnderTrustedCheckout(job Job, uses string) bool {
 	return false
 }
 
+// localActionStagedBeforeForkCheckout reports whether a parent-escaping local
+// action (`uses: ./../<dir>/...`) resolves to a sibling directory that a run
+// step populated BEFORE the untrusted (fork) checkout at forkCheckoutIdx.
+//
+// This recognizes GitHub's recommended pull_request_target hardening idiom:
+// check out the trusted base ref, copy the scripts/actions you intend to
+// execute into a directory OUTSIDE the workspace (e.g. `../base-branch/`), then
+// check out the fork PR head into the workspace. `actions/checkout` only writes
+// within GITHUB_WORKSPACE, so a `..`-escaping path can never be populated by the
+// fork checkout; its contents are whatever the trusted pre-checkout run steps
+// staged there.
+func localActionStagedBeforeForkCheckout(job Job, uses string, forkCheckoutIdx int) bool {
+	p := strings.TrimPrefix(uses, "./")
+	// Only credit paths that escape the workspace via `..` — an in-workspace
+	// `./.github/...` path IS overwritten by the fork checkout and stays untrusted.
+	if !strings.HasPrefix(p, "../") {
+		return false
+	}
+	seg := ""
+	for _, s := range strings.Split(p, "/") {
+		if s == "" || s == "." || s == ".." {
+			continue
+		}
+		seg = s
+		break
+	}
+	if seg == "" || forkCheckoutIdx < 0 {
+		return false
+	}
+	// Require a run step BEFORE the fork checkout that references the sibling
+	// dir — the trusted staging (`mkdir -p ../base/... && cp ... ../base/...`).
+	// Requiring it to precede the untrusted checkout guarantees the staged
+	// content came from the trusted tree, not the fork.
+	for i := 0; i < forkCheckoutIdx && i < len(job.Steps); i++ {
+		if run := job.Steps[i].Run; run != "" && strings.Contains(run, seg) {
+			return true
+		}
+	}
+	return false
+}
+
 // CheckLocalActionUntrustedCheckout detects local action usage after fork checkout (FG-016).
 func CheckLocalActionUntrustedCheckout(wf *Workflow) []Finding {
 	if !wf.On.PullRequestTarget && !wf.On.IssueComment && !wf.On.WorkflowRun {
@@ -2759,6 +2827,13 @@ func CheckLocalActionUntrustedCheckout(wf *Workflow) []Finding {
 		if hasAuthorAssociationGuard(job) || containsForkGuard(job.If) {
 			severity = SeverityInfo
 			guardNote = " (mitigated: job restricts execution to trusted authors / non-forks)"
+		} else if postCheckout := job.Steps[checkoutIdx+1:]; (jobHasNoToken(wf, job) || jobHasReadOnlyToken(wf, job)) && !postCheckoutAccessesSecrets(postCheckout) {
+			// Read-only (or empty) token + no secrets referenced: the fork-controlled
+			// action.yml still runs, but the token can't push/comment and there is
+			// nothing to exfiltrate. This is normal `pull_request` CI (build/lint the
+			// fork). Mirrors FG-001's ReadOnlyToken/NoCredentialExec mitigation.
+			severity = SeverityInfo
+			guardNote = " (mitigated: read-only token, no secrets in scope)"
 		}
 
 		for _, step := range job.Steps[checkoutIdx+1:] {
@@ -2767,6 +2842,16 @@ func CheckLocalActionUntrustedCheckout(wf *Workflow) []Finding {
 				// a trusted ref (e.g. actions checked out at github.workflow_sha
 				// into path/), so its definition is not attacker-controlled.
 				if localActionUnderTrustedCheckout(job, step.Uses) {
+					continue
+				}
+				// The local action lives in a parent-escaping sibling dir
+				// (`./../<dir>/...`) that a run step staged from trusted code
+				// BEFORE the untrusted checkout. `actions/checkout` writes only
+				// inside the workspace, so a `..`-escaping path is never populated
+				// by the fork checkout — its contents come from the trusted
+				// pre-checkout staging (GitHub's recommended "copy trusted scripts
+				// out of the checkout" hardening idiom).
+				if localActionStagedBeforeForkCheckout(job, step.Uses, checkoutIdx) {
 					continue
 				}
 				findings = append(findings, Finding{

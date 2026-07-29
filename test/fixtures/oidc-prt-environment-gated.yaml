@@ -1,0 +1,23 @@
+name: Base Image Release Build
+# pull_request_target with id-token:write AND a fork-head checkout, but the job is
+# bound to a deployment environment. If that environment carries required-reviewer
+# protection, a fork PR pauses for manual approval before any step (or OIDC token
+# request) runs. Protection rules aren't visible in YAML, so FG-008/FG-001 apply a
+# one-level downgrade (critical -> high), not a suppression.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    environment:
+      name: release-base-images
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - run: make build

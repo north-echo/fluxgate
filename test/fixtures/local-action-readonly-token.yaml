@@ -1,0 +1,22 @@
+name: Build Commits
+# Plain pull_request (fork code runs) with a read-only token and no secrets:
+# normal CI. The workflow_run trigger is what makes FG-016 consider the workflow,
+# but read-all + no secrets means the fork-controlled local action has nothing to
+# steal and a token that can't write.
+on:
+  pull_request: {}
+  workflow_run:
+    workflows: ["Cache Cleaner"]
+    branches: [main]
+    types: [completed]
+permissions: read-all
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/disk-cleanup
+      - run: make build
