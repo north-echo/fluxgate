@@ -52,6 +52,7 @@ go install github.com/north-echo/fluxgate/cmd/fluxgate@latest
 | FG-024  | High     | GitHub environment file injection |
 | FG-025  | Critical | Known threat-actor IOC |
 | FG-026  | High     | Lifecycle install before credentialed operation (npm, yarn, pnpm, pip, gem, cargo) |
+| FG-027  | High     | TOCTOU label gate: label not stripped on synchronize |
 
 FG-026 covers dependency code that runs during install or build in a job that
 also holds publish, cloud, or release credentials: npm/yarn/pnpm lifecycle
@@ -118,7 +119,7 @@ credentials, use `--locked` with a committed `Cargo.lock`, vendor with
 | CC-003  | Medium   | Unpinned orb versions |
 | CC-009  | High     | Self-hosted runner on fork PRs |
 
-**56 rules across 6 CI/CD platforms.**
+**57 rules across 6 CI/CD platforms.**
 
 ## Why This Exists
 
