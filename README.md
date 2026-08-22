@@ -59,10 +59,16 @@ also holds publish, cloud, or release credentials: npm/yarn/pnpm lifecycle
 scripts, pip setup hooks, gem native extensions, and Rust `build.rs` and
 proc-macros. Cargo has no separate install phase, so any compiling subcommand
 (`cargo build`, `cargo test`, `cargo clippy`, `cargo install`) counts, and
-there is no `--ignore-scripts` equivalent to suppress it. Mitigations for
-cargo are isolation and provenance instead: build in a job without crates.io
-credentials, use `--locked` with a committed `Cargo.lock`, vendor with
-`--offline`, or gate dependency changes with cargo-vet or cargo-deny.
+there is no `--ignore-scripts` equivalent to suppress it. `release-plz/action`
+counts as a publish operation, since it runs `cargo publish` internally.
+
+Note that job separation alone is not a sufficient mitigation for cargo:
+`cargo publish` runs a verification build by default, so even an isolated
+publish job compiles the crate and its dependencies with the registry token in
+scope. Pair a verified build in an uncredentialed job with `cargo publish
+--no-verify` in the credentialed one. The remaining mitigations are provenance
+rather than suppression: `--locked` with a committed `Cargo.lock`, vendoring
+with `--offline`, and gating dependency changes with cargo-vet or cargo-deny.
 
 ### GitLab CI (GL-xxx)
 
