@@ -51,7 +51,17 @@ go install github.com/north-echo/fluxgate/cmd/fluxgate@latest
 | FG-023  | High     | Artifact credential leak |
 | FG-024  | High     | GitHub environment file injection |
 | FG-025  | Critical | Known threat-actor IOC |
-| FG-026  | High     | Lifecycle install before credentialed operation |
+| FG-026  | High     | Lifecycle install before credentialed operation (npm, yarn, pnpm, pip, gem, cargo) |
+
+FG-026 covers dependency code that runs during install or build in a job that
+also holds publish, cloud, or release credentials: npm/yarn/pnpm lifecycle
+scripts, pip setup hooks, gem native extensions, and Rust `build.rs` and
+proc-macros. Cargo has no separate install phase, so any compiling subcommand
+(`cargo build`, `cargo test`, `cargo clippy`, `cargo install`) counts, and
+there is no `--ignore-scripts` equivalent to suppress it. Mitigations for
+cargo are isolation and provenance instead: build in a job without crates.io
+credentials, use `--locked` with a committed `Cargo.lock`, vendor with
+`--offline`, or gate dependency changes with cargo-vet or cargo-deny.
 
 ### GitLab CI (GL-xxx)
 

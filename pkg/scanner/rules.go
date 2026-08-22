@@ -3966,9 +3966,17 @@ var pnpmInstallPattern = regexp.MustCompile(`(?i)(^|[\s;&|()])pnpm\s+(install|i)
 var pipInstallPattern = regexp.MustCompile(`(?i)(^|[\s;&|()])(python[0-9.]*\s+-m\s+)?pip\s+install\b`)
 var gemInstallPattern = regexp.MustCompile(`(?i)(^|[\s;&|()])(gem\s+install|bundle\s+install)\b`)
 
+// cargoBuildPattern matches cargo subcommands that compile the dependency
+// graph. Cargo has no install/build split: any compiling subcommand runs every
+// dependency's build.rs and proc-macro code on the runner, which is the same
+// primitive as an npm postinstall. `cargo fetch` and `cargo vendor` only
+// download sources and are deliberately excluded.
+var cargoBuildPattern = regexp.MustCompile(`(?i)(^|[\s;&|()])cargo\s+(\+[\w.-]+\s+)?(build|b|test|t|run|r|bench|check|c|clippy|doc|d|install|nextest|llvm-cov|tarpaulin)\b`)
+
 var npmPublishPattern = regexp.MustCompile(`(?i)(^|[\s;&|()])(npm\s+publish|pnpm\s+publish|yarn\s+npm\s+publish)\b`)
 var pypiPublishPattern = regexp.MustCompile(`(?i)(^|[\s;&|()])((python[0-9.]*\s+-m\s+)?twine\s+upload|uv\s+publish|poetry\s+publish|pdm\s+publish|hatch\s+publish)\b`)
 var gemPublishPattern = regexp.MustCompile(`(?i)(^|[\s;&|()])((bundle\s+exec\s+)?gem\s+push|rake\s+release)\b`)
+var cargoPublishPattern = regexp.MustCompile(`(?i)(^|[\s;&|()])(cargo\s+(\+[\w.-]+\s+)?(publish|release)|cargo-release)\b`)
 var ghReleasePattern = regexp.MustCompile(`(?i)(^|[\s;&|()])gh\s+release\s+(create|upload)\b`)
 
 // CheckLifecycleInstallBeforeCredentialedOperation detects package manager
@@ -4018,8 +4026,8 @@ func CheckLifecycleInstallBeforeCredentialedOperation(wf *Workflow) []Finding {
 			}
 
 			msg := fmt.Sprintf(
-				"Lifecycle Install Before Credentialed Operation: %s install runs before %s in job '%s'",
-				install.ecosystem, op.kind, jobName)
+				"Lifecycle Install Before Credentialed Operation: %s runs before %s in job '%s'",
+				lifecycleInstallLabel(install), op.kind, jobName)
 			if reason != "" {
 				msg += " (" + reason + ")"
 			}
@@ -4150,6 +4158,13 @@ func lifecycleInstalls(wf *Workflow, job Job) []lifecycleInstall {
 			installs = append(installs, lifecycleInstall{step: step, index: i, ecosystem: "gem", command: matchedCommand(step.Run, gemInstallPattern)})
 			continue
 		}
+		// Cargo: no --ignore-scripts equivalent exists, so there is no
+		// installScriptsSuppressed check here. Every compiling cargo
+		// invocation executes third-party build.rs code.
+		if cargoBuildPattern.MatchString(step.Run) {
+			installs = append(installs, lifecycleInstall{step: step, index: i, ecosystem: "cargo", command: matchedCommand(step.Run, cargoBuildPattern)})
+			continue
+		}
 	}
 	return installs
 }
@@ -4206,6 +4221,10 @@ func credentialedOperations(wf *Workflow, job Job) []credentialedOperation {
 				ops = append(ops, credentialedOperation{step: step, index: i, kind: "PyPI publish", ecosystem: "pip", command: matchedCommand(step.Run, pypiPublishPattern), class: credClassRegistry})
 			case gemPublishPattern.MatchString(step.Run):
 				ops = append(ops, credentialedOperation{step: step, index: i, kind: "RubyGems publish", ecosystem: "gem", command: matchedCommand(step.Run, gemPublishPattern), class: credClassRegistry})
+			case cargoPublishPattern.MatchString(step.Run):
+				if cmd := cargoPublishCommand(step.Run); cmd != "" {
+					ops = append(ops, credentialedOperation{step: step, index: i, kind: "crates.io publish", ecosystem: "cargo", command: cmd, class: credClassRegistry})
+				}
 			case ghReleasePattern.MatchString(step.Run):
 				if effectivePermission(wf, job, "contents") == "write" || hasCredentialEnv(wf, job, step) || HasElevatedPermissions(wf.Permissions, job.Permissions) {
 					ops = append(ops, credentialedOperation{step: step, index: i, kind: "GitHub release", command: matchedCommand(step.Run, ghReleasePattern), class: credClassGithubToken})
@@ -4235,6 +4254,14 @@ func credentialedOperations(wf *Workflow, job Job) []credentialedOperation {
 				ops = append(ops, credentialedOperation{step: step, index: i, kind: "PyPI publish", ecosystem: "pip", command: action, class: credClassRegistry})
 			case "rubygems/release-gem":
 				ops = append(ops, credentialedOperation{step: step, index: i, kind: "RubyGems publish", ecosystem: "gem", command: action, class: credClassRegistry})
+			case "katyo/publish-crates":
+				ops = append(ops, credentialedOperation{step: step, index: i, kind: "crates.io publish", ecosystem: "cargo", command: action, class: credClassRegistry})
+			case "rust-lang/crates-io-auth-action":
+				// Trusted publishing: mints a short-lived crates.io token into
+				// CARGO_REGISTRY_TOKEN for later steps. Shorter-lived than a
+				// stored API token, but still a registry credential present in
+				// the job environment after a build.rs has already run.
+				ops = append(ops, credentialedOperation{step: step, index: i, kind: "crates.io trusted-publishing auth", ecosystem: "cargo", command: action, class: credClassRegistry})
 			}
 		}
 	}
@@ -4676,6 +4703,35 @@ func matchedCommand(run string, re *regexp.Regexp) string {
 	return strings.TrimLeft(match, " \t\n\r;&|()")
 }
 
+// cargoPublishCommand returns the cargo publish/release invocation in run, or
+// "" when every such invocation is a dry run. `cargo publish --dry-run` packages
+// and verifies locally without contacting the registry, so no token is exposed.
+func cargoPublishCommand(run string) string {
+	for _, raw := range strings.Split(run, "\n") {
+		for _, seg := range splitShellSegments(raw) {
+			if !cargoPublishPattern.MatchString(seg) {
+				continue
+			}
+			if strings.Contains(strings.ToLower(seg), "--dry-run") {
+				continue
+			}
+			return matchedCommand(seg, cargoPublishPattern)
+		}
+	}
+	return ""
+}
+
+// lifecycleInstallLabel names the execution-bearing step. Cargo has no separate
+// install phase — compiling is what runs dependency build.rs code — so
+// "cargo install" would both misname the step and collide with the real
+// `cargo install` subcommand.
+func lifecycleInstallLabel(install lifecycleInstall) string {
+	if install.ecosystem == "cargo" {
+		return "cargo build-script execution (" + install.command + ")"
+	}
+	return install.ecosystem + " install"
+}
+
 func lifecycleInstallMitigations(ecosystem string) []string {
 	common := []string{
 		"Run dependency installation in a separate job that has no publish, release, cloud, or repository-write credentials",
@@ -4695,6 +4751,15 @@ func lifecycleInstallMitigations(ecosystem string) []string {
 	case "gem":
 		return append([]string{
 			"Install RubyGems/Bundler dependencies in an isolated job or prebuilt image instead of the publish job",
+		}, common...)
+	case "cargo":
+		// Cargo has no --ignore-scripts: build.rs execution cannot be disabled,
+		// so every mitigation is isolation or provenance, not suppression.
+		return append([]string{
+			"Build and test in a job holding no crates.io credentials, then publish from a job that only runs cargo publish",
+			"Commit Cargo.lock and build with --locked so a newly published dependency version cannot be resolved into the credentialed job",
+			"Vendor dependencies with cargo vendor and build with --offline so only reviewed, committed source runs at build time",
+			"Gate dependency changes with cargo-vet or cargo-deny",
 		}, common...)
 	default:
 		return common
