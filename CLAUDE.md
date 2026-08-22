@@ -2,7 +2,7 @@
 
 ## Project
 
-Fluxgate is a CI/CD pipeline security static analysis tool with **56 detection rules across 6 platforms** (GitHub Actions, GitLab CI, Azure Pipelines, Jenkins, Tekton, CircleCI). Current version: **v0.7.6**.
+Fluxgate is a CI/CD pipeline security static analysis tool with **57 detection rules across 6 platforms** (GitHub Actions, GitLab CI, Azure Pipelines, Jenkins, Tekton, CircleCI). Current version: **v0.7.6**.
 
 ## Security Boundaries
 
@@ -25,7 +25,7 @@ A pre-push hook blocks commits containing disclosure ID patterns. Use `--no-veri
   - Finding, ScanResult, Workflow types
   - ScanWorkflowBytes, ScanFile, ScanDirectory, ParseWorkflow
   - AllRules(), RuleDescriptions, all Check* functions
-  - GitHub Actions rules (FG-001 through FG-023) live here
+  - GitHub Actions rules (FG-001 through FG-027) live here
 
 ### Private packages
 - `cmd/fluxgate/` — CLI entry point (cobra), 16 commands
