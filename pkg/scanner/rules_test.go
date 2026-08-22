@@ -545,6 +545,78 @@ func TestCheckLifecycleInstallBeforeCredentialedOperation(t *testing.T) {
 	}
 }
 
+func TestCheckLifecycleInstallBeforeCredentialedOperation_Cargo(t *testing.T) {
+	wf, err := ParseWorkflowFile("../../test/fixtures/lifecycle-cargo-publish.yaml")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	findings := CheckLifecycleInstallBeforeCredentialedOperation(wf)
+
+	byJob := map[string]Finding{}
+	for _, f := range findings {
+		if f.RuleID != "FG-026" {
+			t.Errorf("expected FG-026, got %s", f.RuleID)
+		}
+		for _, job := range []string{
+			"cargo-token-publish", "cargo-trusted-publish", "cargo-install-tooling",
+			"cargo-publish-action", "cargo-dry-run", "cargo-fetch-only",
+			"cargo-separated-build", "cargo-publish-only",
+		} {
+			if strings.Contains(f.Message, "'"+job+"'") {
+				byJob[job] = f
+			}
+		}
+	}
+
+	for _, job := range []string{"cargo-dry-run", "cargo-fetch-only", "cargo-separated-build", "cargo-publish-only"} {
+		if f, ok := byJob[job]; ok {
+			t.Errorf("unexpected finding for %s: %s", job, f.Message)
+		}
+	}
+
+	cases := []struct {
+		job      string
+		severity string
+		op       string
+	}{
+		{"cargo-token-publish", SeverityMedium, "crates.io publish"},
+		{"cargo-trusted-publish", SeverityLow, "crates.io trusted-publishing auth"},
+		{"cargo-install-tooling", SeverityMedium, "crates.io publish"},
+		{"cargo-publish-action", SeverityMedium, "crates.io publish"},
+	}
+	for _, tc := range cases {
+		f, ok := byJob[tc.job]
+		if !ok {
+			t.Errorf("expected finding for job %s", tc.job)
+			continue
+		}
+		if f.Severity != tc.severity {
+			t.Errorf("%s: expected %s, got %s (%s)", tc.job, tc.severity, f.Severity, f.Message)
+		}
+		if !strings.Contains(f.Message, "cargo build-script execution (") ||
+			!strings.Contains(f.Message, "runs before "+tc.op) {
+			t.Errorf("%s: expected cargo build-script execution before %q, got %s", tc.job, tc.op, f.Message)
+		}
+		if !containsMitigation(f.Mitigations, "--locked") {
+			t.Errorf("%s: expected cargo-specific mitigations, got %v", tc.job, f.Mitigations)
+		}
+	}
+
+	if len(findings) != len(cases) {
+		t.Errorf("expected %d findings, got %d: %v", len(cases), len(findings), findings)
+	}
+}
+
+func containsMitigation(mitigations []string, substr string) bool {
+	for _, m := range mitigations {
+		if strings.Contains(m, substr) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestCheckLifecycleInstallBeforeCredentialedOperation_SeverityTiers(t *testing.T) {
 	makeWorkflow := func(env string, dispatch bool, jobIf string) *Workflow {
 		wf := &Workflow{
