@@ -4254,6 +4254,13 @@ func credentialedOperations(wf *Workflow, job Job) []credentialedOperation {
 				ops = append(ops, credentialedOperation{step: step, index: i, kind: "PyPI publish", ecosystem: "pip", command: action, class: credClassRegistry})
 			case "rubygems/release-gem":
 				ops = append(ops, credentialedOperation{step: step, index: i, kind: "RubyGems publish", ecosystem: "gem", command: action, class: credClassRegistry})
+			case "release-plz/action":
+				// release-plz runs `cargo publish` internally. Its `command`
+				// input accepts release-pr or release; unspecified runs both,
+				// so only an explicit release-pr is publish-free.
+				if releasePlzPublishes(step) {
+					ops = append(ops, credentialedOperation{step: step, index: i, kind: "crates.io publish", ecosystem: "cargo", command: action, class: credClassRegistry})
+				}
 			case "katyo/publish-crates":
 				ops = append(ops, credentialedOperation{step: step, index: i, kind: "crates.io publish", ecosystem: "cargo", command: action, class: credClassRegistry})
 			case "rust-lang/crates-io-auth-action":
@@ -4703,6 +4710,22 @@ func matchedCommand(run string, re *regexp.Regexp) string {
 	return strings.TrimLeft(match, " \t\n\r;&|()")
 }
 
+// releasePlzPublishes reports whether a release-plz/action step reaches
+// crates.io. Per the action's own input docs, `command` accepts release-pr or
+// release and "if unspecified, this action runs both these commands", so an
+// absent command still publishes. `dry_run` adds --dry-run to the release
+// command, which contacts no registry.
+func releasePlzPublishes(step Step) bool {
+	if strings.EqualFold(strings.TrimSpace(step.With["command"]), "release-pr") {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(step.With["dry_run"])) {
+	case "true", "1", "yes":
+		return false
+	}
+	return true
+}
+
 // cargoPublishCommand returns the cargo publish/release invocation in run, or
 // "" when every such invocation is a dry run. `cargo publish --dry-run` packages
 // and verifies locally without contacting the registry, so no token is exposed.
@@ -4755,12 +4778,19 @@ func lifecycleInstallMitigations(ecosystem string) []string {
 	case "cargo":
 		// Cargo has no --ignore-scripts: build.rs execution cannot be disabled,
 		// so every mitigation is isolation or provenance, not suppression.
+		//
+		// The generic "install in a separate job" advice in common[0] is not
+		// sufficient here and is deliberately replaced: `cargo publish` runs a
+		// verification build by default, so an isolated publish job still
+		// compiles the crate and its dependencies with the registry token in
+		// scope. --no-verify is what actually removes that, which is why this
+		// list leads with the paired form rather than with job separation.
 		return append([]string{
-			"Build and test in a job holding no crates.io credentials, then publish from a job that only runs cargo publish",
+			"Verify the build in a job holding no crates.io credentials, then publish with cargo publish --no-verify in the credentialed job. Job separation alone is not sufficient, because cargo publish otherwise runs its own verification build and executes dependency build scripts with the token in scope",
 			"Commit Cargo.lock and build with --locked so a newly published dependency version cannot be resolved into the credentialed job",
 			"Vendor dependencies with cargo vendor and build with --offline so only reviewed, committed source runs at build time",
 			"Gate dependency changes with cargo-vet or cargo-deny",
-		}, common...)
+		}, common[1:]...)
 	default:
 		return common
 	}

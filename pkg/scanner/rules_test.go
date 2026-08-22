@@ -562,6 +562,8 @@ func TestCheckLifecycleInstallBeforeCredentialedOperation_Cargo(t *testing.T) {
 			"cargo-token-publish", "cargo-trusted-publish", "cargo-install-tooling",
 			"cargo-publish-action", "cargo-dry-run", "cargo-fetch-only",
 			"cargo-separated-build", "cargo-publish-only",
+			"cargo-release-plz-default", "cargo-release-plz-release",
+			"cargo-release-plz-pr-only", "cargo-release-plz-dry-run",
 		} {
 			if strings.Contains(f.Message, "'"+job+"'") {
 				byJob[job] = f
@@ -569,7 +571,12 @@ func TestCheckLifecycleInstallBeforeCredentialedOperation_Cargo(t *testing.T) {
 		}
 	}
 
-	for _, job := range []string{"cargo-dry-run", "cargo-fetch-only", "cargo-separated-build", "cargo-publish-only"} {
+	for _, job := range []string{
+		"cargo-dry-run", "cargo-fetch-only", "cargo-separated-build", "cargo-publish-only",
+		// release-pr opens a PR without publishing; dry_run adds --dry-run to
+		// the release command, so neither reaches crates.io.
+		"cargo-release-plz-pr-only", "cargo-release-plz-dry-run",
+	} {
 		if f, ok := byJob[job]; ok {
 			t.Errorf("unexpected finding for %s: %s", job, f.Message)
 		}
@@ -584,6 +591,9 @@ func TestCheckLifecycleInstallBeforeCredentialedOperation_Cargo(t *testing.T) {
 		{"cargo-trusted-publish", SeverityLow, "crates.io trusted-publishing auth"},
 		{"cargo-install-tooling", SeverityMedium, "crates.io publish"},
 		{"cargo-publish-action", SeverityMedium, "crates.io publish"},
+		// command unspecified runs both release-pr and release, so it publishes
+		{"cargo-release-plz-default", SeverityMedium, "crates.io publish"},
+		{"cargo-release-plz-release", SeverityLow, "crates.io publish"},
 	}
 	for _, tc := range cases {
 		f, ok := byJob[tc.job]
@@ -600,6 +610,15 @@ func TestCheckLifecycleInstallBeforeCredentialedOperation_Cargo(t *testing.T) {
 		}
 		if !containsMitigation(f.Mitigations, "--locked") {
 			t.Errorf("%s: expected cargo-specific mitigations, got %v", tc.job, f.Mitigations)
+		}
+		// cargo publish runs a verification build by default, so job
+		// separation alone is not a sufficient mitigation and the guidance
+		// must name --no-verify rather than promising isolation is enough.
+		if !containsMitigation(f.Mitigations, "--no-verify") {
+			t.Errorf("%s: expected --no-verify guidance, got %v", tc.job, f.Mitigations)
+		}
+		if containsMitigation(f.Mitigations, "Run dependency installation in a separate job") {
+			t.Errorf("%s: generic isolation advice overpromises for cargo, got %v", tc.job, f.Mitigations)
 		}
 	}
 
