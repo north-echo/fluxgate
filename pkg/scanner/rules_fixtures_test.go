@@ -1527,6 +1527,154 @@ func TestPublicIPURL(t *testing.T) {
 	}
 }
 
+// --- FG-025 wfx-loot indicators ---
+
+func TestCheckKnownIOCs_WfxLoot(t *testing.T) {
+	wf := loadFixture(t, "known-ioc-wfx.yaml")
+	findings := CheckKnownIOCs(wf)
+	if len(findings) != 4 {
+		t.Fatalf("expected 4 findings, got %d: %v", len(findings), findings)
+	}
+	for _, f := range findings {
+		if f.Severity != SeverityCritical || !strings.Contains(f.Message, "wfx-loot") {
+			t.Errorf("expected critical wfx-loot finding, got: %v", f)
+		}
+		if strings.Contains(f.Message, "clean-job") {
+			t.Errorf("clean job must not match: %s", f.Message)
+		}
+	}
+}
+
+// --- FG-029 Ungated Cloud OIDC tests ---
+
+// push with no filter plus pull_request: the unguarded and fork-checked AWS
+// logins are high; the ref-guarded GCP login is medium; environment-gated, static-key, and
+// no-id-token jobs are exempt.
+func TestCheckUngatedCloudOIDC(t *testing.T) {
+	wf := loadFixture(t, "cloud-oidc-ungated.yaml")
+	findings := CheckUngatedCloudOIDC(wf)
+	want := map[string]string{
+		"aws-any-branch":   SeverityHigh,
+		"aws-fork-checked": SeverityHigh,
+		"gcp-ref-guarded":  SeverityMedium,
+	}
+	if len(findings) != len(want) {
+		t.Fatalf("expected %d findings, got %d: %v", len(want), len(findings), findings)
+	}
+	for _, f := range findings {
+		if f.RuleID != "FG-029" {
+			t.Errorf("expected FG-029, got %s", f.RuleID)
+		}
+		matched := false
+		for job, sev := range want {
+			if strings.Contains(f.Message, "job "+job+" ") {
+				matched = true
+				if f.Severity != sev {
+					t.Errorf("job %s: expected %s, got %s", job, sev, f.Severity)
+				}
+			}
+		}
+		if !matched {
+			t.Errorf("unexpected finding: %s", f.Message)
+		}
+	}
+}
+
+// Logins reachable only from main and workflow_dispatch are medium: the
+// trust policy may pin sub to the protected ref.
+func TestCheckUngatedCloudOIDC_ProtectedRefs(t *testing.T) {
+	wf := loadFixture(t, "cloud-oidc-main-only.yaml")
+	findings := CheckUngatedCloudOIDC(wf)
+	if len(findings) != 2 {
+		t.Fatalf("expected 2 findings (AWS, Vault), got %d: %v", len(findings), findings)
+	}
+	for _, f := range findings {
+		if f.Severity != SeverityMedium {
+			t.Errorf("expected medium, got %s: %s", f.Severity, f.Message)
+		}
+	}
+}
+
+// A job pinned to one repository keeps its severity but says it is inert in
+// forks, so fork owners can triage inherited upstream workflows.
+func TestCheckUngatedCloudOIDC_RepositoryPinnedNote(t *testing.T) {
+	wf, err := ParseWorkflow([]byte(`on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    if: github.repository == 'upstream-org/project'
+    permissions:
+      id-token: write
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::123456789012:role/build
+`), "test.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings := CheckUngatedCloudOIDC(wf)
+	if len(findings) != 1 || findings[0].Severity != SeverityHigh {
+		t.Fatalf("expected 1 high finding, got %v", findings)
+	}
+	if !strings.Contains(findings[0].Message, "inert in forks") {
+		t.Errorf("expected fork note, got: %s", findings[0].Message)
+	}
+}
+
+// External triggers are FG-008's; FG-029 stays silent on them.
+func TestCheckUngatedCloudOIDC_ExternalTriggerLeftToFG008(t *testing.T) {
+	wf, err := ParseWorkflow([]byte(`on: pull_request_target
+permissions:
+  id-token: write
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::123456789012:role/deploy
+`), "test.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if findings := CheckUngatedCloudOIDC(wf); len(findings) != 0 {
+		t.Fatalf("expected 0 findings, got %v", findings)
+	}
+}
+
+func TestCheckUngatedCloudOIDC_Safe(t *testing.T) {
+	wf := loadFixture(t, "safe-workflow.yaml")
+	if findings := CheckUngatedCloudOIDC(wf); len(findings) != 0 {
+		t.Fatalf("expected 0 findings for safe workflow, got %d", len(findings))
+	}
+}
+
+func TestParseTriggers_PushAnyBranch(t *testing.T) {
+	for _, tc := range []struct {
+		on   string
+		want bool
+	}{
+		{"push", true},
+		{"[push, pull_request]", true},
+		{"\n  push:", true},
+		{"\n  push:\n    branches: [main]", false},
+		{"\n  push:\n    branches: [main, 'release/**']", true},
+		{"\n  push:\n    branches-ignore: [gh-pages]", true},
+		{"\n  push:\n    tags: ['v*']", false},
+		{"\n  push:\n    paths: ['src/**']", true},
+		{"pull_request", false},
+	} {
+		wf, err := ParseWorkflow([]byte("on: "+tc.on+"\njobs: {}\n"), "test.yml")
+		if err != nil {
+			t.Fatalf("on: %q: %v", tc.on, err)
+		}
+		if wf.On.PushAnyBranch != tc.want {
+			t.Errorf("on: %q: PushAnyBranch = %v, want %v", tc.on, wf.On.PushAnyBranch, tc.want)
+		}
+	}
+}
+
 // --- FG-017 GitHub Script Injection tests ---
 
 func TestCheckGitHubScriptInjection(t *testing.T) {

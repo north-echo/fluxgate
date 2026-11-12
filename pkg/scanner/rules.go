@@ -3864,6 +3864,26 @@ var knownIOCs = []iocEntry{
 		Campaign: "Mini Shai-Hulud / TeamPCP (May 2026)",
 		Note:     "Reversed 'Shai-Hulud: Here We Go Again' marker used in 2,500+ attacker-created repos",
 	},
+	{
+		Needle:   "194.150.166.244",
+		Campaign: "wfx-loot (Nov 2026)",
+		Note:     "Exfil endpoint for the CI secret stealer pushed with compromised GitHub accounts; receives gzipped secrets, env, and runner memory",
+	},
+	{
+		Needle:   "18.143.168.96",
+		Campaign: "wfx-loot (Nov 2026)",
+		Note:     "Second exfil endpoint for the same stealer",
+	},
+	{
+		Needle:   "<!--WFX-BEGIN-->",
+		Campaign: "wfx-loot (Nov 2026)",
+		Note:     "Step-summary marker the stealer wraps encoded loot in",
+	},
+	{
+		Needle:   "wfx-loot-",
+		Campaign: "wfx-loot (Nov 2026)",
+		Note:     "Artifact name prefix the stealer uploads loot under",
+	},
 }
 
 // CheckKnownIOCs flags exact threat-actor indicators in workflow run blocks,
@@ -5307,4 +5327,122 @@ func publicIPURL(text string) string {
 		return m[1]
 	}
 	return ""
+}
+
+// --- FG-029 Ungated Cloud OIDC ---
+
+// cloudOIDCLogin returns the cloud provider a step authenticates to through
+// GitHub OIDC, or "" if the step is not an OIDC cloud login. Static-key
+// logins (aws-access-key-id, azure creds) mint nothing from the job's
+// identity token and are left to the secret rules.
+func cloudOIDCLogin(step Step) string {
+	name := step.Uses
+	if idx := strings.Index(name, "@"); idx != -1 {
+		name = name[:idx]
+	}
+	switch name {
+	case "aws-actions/configure-aws-credentials":
+		if step.With["role-to-assume"] != "" && step.With["aws-access-key-id"] == "" {
+			return "AWS"
+		}
+	case "azure/login":
+		if step.With["client-id"] != "" && step.With["creds"] == "" {
+			return "Azure"
+		}
+	case "google-github-actions/auth":
+		if step.With["workload_identity_provider"] != "" {
+			return "GCP"
+		}
+	case "hashicorp/vault-action":
+		if strings.EqualFold(step.With["method"], "jwt") {
+			return "Vault"
+		}
+	}
+	return ""
+}
+
+// jobHasIDTokenWrite reports whether the job can request an OIDC token.
+// Job-level permissions replace workflow-level ones entirely.
+func jobHasIDTokenWrite(wf *Workflow, job Job) bool {
+	if job.Permissions.Set {
+		return job.Permissions.WriteAll || job.Permissions.Scopes["id-token"] == "write"
+	}
+	return wf.Permissions.WriteAll || wf.Permissions.Scopes["id-token"] == "write"
+}
+
+// CheckUngatedCloudOIDC flags jobs that log into a cloud provider through
+// GitHub OIDC without an environment gate (FG-029). The threat is a repo
+// writer, or a stolen write token: they can push a branch carrying their own
+// workflow, and the token it mints is accepted wherever the cloud trust
+// policy's sub condition admits that branch. Without an environment, the
+// trust policy is the only boundary, and fluxgate cannot see it.
+//
+// High when the workflow's own triggers prove the policy admits refs a
+// writer can create: pull_request (sub ...:pull_request) or push on any
+// branch. Medium otherwise, since the policy may pin sub to a protected ref.
+// External triggers are left to FG-008.
+func CheckUngatedCloudOIDC(wf *Workflow) []Finding {
+	if wf.On.PullRequestTarget || wf.On.IssueComment {
+		return nil
+	}
+	var findings []Finding
+	for jobName, job := range wf.Jobs {
+		if job.Environment != "" || !jobHasIDTokenWrite(wf, job) {
+			continue
+		}
+		for _, step := range job.Steps {
+			provider := cloudOIDCLogin(step)
+			if provider == "" {
+				continue
+			}
+			// Only a ref condition can confine the login to protected refs.
+			// Fork checks (head.repo.full_name == github.repository) and
+			// event_name clauses still admit same-repo branches and PRs,
+			// which is exactly what a compromised writer uses.
+			guard := job.If + " " + step.If
+			guarded := strings.Contains(guard, "github.ref")
+
+			var openTriggers []string
+			if wf.On.PullRequest {
+				openTriggers = append(openTriggers, "pull_request")
+			}
+			if wf.On.PushAnyBranch {
+				openTriggers = append(openTriggers, "push to any branch")
+			}
+
+			severity := SeverityMedium
+			msg := fmt.Sprintf(
+				"Ungated Cloud OIDC: job %s logs into %s via OIDC with no environment gate; the cloud trust policy is the only boundary",
+				jobName, provider)
+			if len(openTriggers) > 0 && !guarded {
+				severity = SeverityHigh
+				msg = fmt.Sprintf(
+					"Ungated Cloud OIDC: job %s logs into %s via OIDC on %s with no environment gate; the trust policy must admit refs any writer can create",
+					jobName, provider, strings.Join(openTriggers, " and "))
+			}
+			// Upstream workflows inherited by a fork are often pinned to the
+			// upstream repo. Severity stands (it is real upstream), but the
+			// note lets a fork owner triage it as inert.
+			if strings.Contains(guard, "github.repository ==") || strings.Contains(guard, "github.repository==") {
+				msg += " (job is pinned to a specific repository; inert in forks)"
+			}
+			findings = append(findings, Finding{
+				RuleID:   "FG-029",
+				Severity: severity,
+				File:     wf.Path,
+				Line:     step.Line,
+				Message:  msg,
+				Details: "Anyone with write access, including a compromised account or stolen " +
+					"token, can push a branch with their own workflow and request an OIDC token " +
+					"for it. If the cloud trust policy's sub condition admits that branch, they " +
+					"get these cloud credentials and can create access that survives token rotation.",
+				Mitigations: []string{
+					"Bind the job to an environment with a deployment branch rule and key the trust policy's sub on that environment",
+					"Otherwise pin the trust policy's sub to a protected ref (repo:OWNER/REPO:ref:refs/heads/main), never a wildcard",
+					"Audit the role's trust policy and recent IAM changes (new keys, trust edits, federated credentials)",
+				},
+			})
+		}
+	}
+	return findings
 }

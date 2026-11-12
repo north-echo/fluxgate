@@ -34,6 +34,7 @@ var allRules = map[string]Rule{
 	"FG-026": CheckLifecycleInstallBeforeCredentialedOperation,
 	"FG-027": CheckLabelGateTOCTOU,
 	"FG-028": CheckSecretExfiltration,
+	"FG-029": CheckUngatedCloudOIDC,
 }
 
 // AllRules returns all enabled detection rules. The returned map is a copy;
@@ -76,4 +77,5 @@ var RuleDescriptions = map[string]string{
 	"FG-026": "Lifecycle Install Before Credentialed Operation",
 	"FG-027": "TOCTOU Label Gate",
 	"FG-028": "Secret Exfiltration Behavior",
+	"FG-029": "Ungated Cloud OIDC",
 }
