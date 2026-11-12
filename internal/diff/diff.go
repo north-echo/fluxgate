@@ -86,11 +86,17 @@ const findingsQuery = `
 	ORDER BY r.owner, r.name, f.workflow_path, f.rule_id
 `
 
-// queryFindings loads all findings from a store database.
+// queryFindings loads all findings from a store database, with workflow
+// paths normalized to be repo-relative.
 func queryFindings(db *store.DB) ([]findingRow, error) {
 	var rows []findingRow
-	err := db.SqlxDB().Select(&rows, findingsQuery)
-	return rows, err
+	if err := db.SqlxDB().Select(&rows, findingsQuery); err != nil {
+		return nil, err
+	}
+	for i := range rows {
+		rows[i].WorkflowPath = store.RepoRelativePath(rows[i].Owner, rows[i].RepoName, rows[i].WorkflowPath)
+	}
+	return rows, nil
 }
 
 // Compare opens two scan databases and categorizes findings as new, resolved,

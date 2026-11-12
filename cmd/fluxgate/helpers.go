@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/north-echo/fluxgate/internal/report"
@@ -105,4 +106,15 @@ func generateReport(db *store.DB, path string) error {
 	report.WriteMarkdown(f, stats, criticals)
 	fmt.Printf("Report written to %s\n", path)
 	return nil
+}
+
+// relativizeFindingPaths rewrites finding paths from a local checkout to be
+// relative to the repo root, so clone-mode results store the same paths as
+// API-mode results (".github/workflows/ci.yml") and diff across modes.
+func relativizeFindingPaths(dir string, result *scanner.ScanResult) {
+	for i := range result.Findings {
+		if rel, err := filepath.Rel(dir, result.Findings[i].File); err == nil && !strings.HasPrefix(rel, "..") {
+			result.Findings[i].File = filepath.ToSlash(rel)
+		}
+	}
 }

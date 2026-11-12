@@ -202,3 +202,89 @@ func TestMergeDBs_EmptySource(t *testing.T) {
 		t.Errorf("expected 0 findings merged, got %d", stats.FindingsMerged)
 	}
 }
+
+// The same finding from an API-mode scan and an older clone-mode scan must
+// dedupe, and the merged row stores the repo-relative path.
+func TestMergeDBs_CloneModePathsDedupe(t *testing.T) {
+	dir := t.TempDir()
+	api := filepath.Join(dir, "api.db")
+	clone := filepath.Join(dir, "clone.db")
+	target := filepath.Join(dir, "target.db")
+
+	save := func(path, file string) {
+		saveTestData(t, path, []struct {
+			owner, repo string
+			stars       int
+			lang        string
+			result      *scanner.ScanResult
+		}{{
+			owner: "org", repo: "tool", stars: 1, lang: "Go",
+			result: &scanner.ScanResult{
+				Path: "org/tool", Workflows: 1,
+				Findings: []scanner.Finding{
+					{RuleID: "FG-001", Severity: "critical", File: file, Line: 8, Message: "pwn request"},
+				},
+			},
+		}})
+	}
+	save(api, ".github/workflows/ci.yml")
+	save(clone, "clones/org/tool/.github/workflows/ci.yml")
+
+	stats, err := MergeDBs(target, []string{clone, api})
+	if err != nil {
+		t.Fatalf("MergeDBs: %v", err)
+	}
+	if stats.FindingsMerged != 1 || stats.FindingsSkipped != 1 {
+		t.Fatalf("expected 1 merged and 1 skipped, got merged=%d skipped=%d",
+			stats.FindingsMerged, stats.FindingsSkipped)
+	}
+
+	db, err := store.Open(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var paths []string
+	if err := db.SqlxDB().Select(&paths, "SELECT workflow_path FROM findings"); err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 1 || paths[0] != ".github/workflows/ci.yml" {
+		t.Errorf("expected one repo-relative path, got %v", paths)
+	}
+}
+
+// Merging into a target that already holds older clone-mode rows must still
+// dedupe against them.
+func TestMergeDBs_CloneModeTargetDedupe(t *testing.T) {
+	dir := t.TempDir()
+	api := filepath.Join(dir, "api.db")
+	target := filepath.Join(dir, "target.db")
+
+	save := func(path, file string) {
+		saveTestData(t, path, []struct {
+			owner, repo string
+			stars       int
+			lang        string
+			result      *scanner.ScanResult
+		}{{
+			owner: "org", repo: "tool", stars: 1, lang: "Go",
+			result: &scanner.ScanResult{
+				Path: "org/tool", Workflows: 1,
+				Findings: []scanner.Finding{
+					{RuleID: "FG-001", Severity: "critical", File: file, Line: 8, Message: "pwn request"},
+				},
+			},
+		}})
+	}
+	save(target, "clones/org/tool/.github/workflows/ci.yml")
+	save(api, ".github/workflows/ci.yml")
+
+	stats, err := MergeDBs(target, []string{api})
+	if err != nil {
+		t.Fatalf("MergeDBs: %v", err)
+	}
+	if stats.FindingsMerged != 0 || stats.FindingsSkipped != 1 {
+		t.Fatalf("expected 0 merged and 1 skipped, got merged=%d skipped=%d",
+			stats.FindingsMerged, stats.FindingsSkipped)
+	}
+}

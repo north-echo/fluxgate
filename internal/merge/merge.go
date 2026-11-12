@@ -205,18 +205,30 @@ func mergeSource(target *sqlx.Tx, source *sqlx.DB, stats *MergeStats) error {
 	// Preload the target's existing findings once for in-memory dedup —
 	// a per-finding SELECT COUNT here was the dominant cost of large merges.
 	existingFindings := make(map[findingKey]int64)
+	// Paths are keyed repo-relative on both sides: clone-mode and API-mode
+	// scans store the same workflow under different paths.
 	var targetFindings []struct {
 		ID           int64  `db:"id"`
 		RepoID       int64  `db:"repo_id"`
 		WorkflowPath string `db:"workflow_path"`
 		RuleID       string `db:"rule_id"`
 		LineNumber   int    `db:"line_number"`
+		Owner        string `db:"owner"`
+		Name         string `db:"name"`
 	}
-	if err := target.Select(&targetFindings, "SELECT id, repo_id, workflow_path, rule_id, line_number FROM findings"); err != nil {
+	if err := target.Select(&targetFindings,
+		`SELECT f.id, f.repo_id, f.workflow_path, f.rule_id, f.line_number, r.owner, r.name
+		 FROM findings f JOIN repos r ON r.id = f.repo_id`); err != nil {
 		return fmt.Errorf("querying target findings: %w", err)
 	}
 	for _, tf := range targetFindings {
-		existingFindings[findingKey{tf.RepoID, tf.WorkflowPath, tf.RuleID, tf.LineNumber}] = tf.ID
+		path := store.RepoRelativePath(tf.Owner, tf.Name, tf.WorkflowPath)
+		existingFindings[findingKey{tf.RepoID, path, tf.RuleID, tf.LineNumber}] = tf.ID
+	}
+
+	sourceRepos := make(map[int64]sourceRepo, len(repos))
+	for _, r := range repos {
+		sourceRepos[r.ID] = r
 	}
 
 	insertFinding, err := target.Preparex(
@@ -236,7 +248,9 @@ func mergeSource(target *sqlx.Tx, source *sqlx.DB, stats *MergeStats) error {
 			continue
 		}
 
-		key := findingKey{targetRepoID, f.WorkflowPath, f.RuleID, f.LineNumber}
+		repo := sourceRepos[f.RepoID]
+		path := store.RepoRelativePath(repo.Owner, repo.Name, f.WorkflowPath)
+		key := findingKey{targetRepoID, path, f.RuleID, f.LineNumber}
 		if existingID, ok := existingFindings[key]; ok {
 			findingIDMap[f.ID] = existingID
 			stats.FindingsSkipped++
@@ -244,7 +258,7 @@ func mergeSource(target *sqlx.Tx, source *sqlx.DB, stats *MergeStats) error {
 		}
 
 		res, err := insertFinding.Exec(
-			targetRepoID, f.WorkflowPath, f.RuleID, f.Severity, f.LineNumber, f.Description, f.Details, f.CreatedAt, f.WorkflowHash,
+			targetRepoID, path, f.RuleID, f.Severity, f.LineNumber, f.Description, f.Details, f.CreatedAt, f.WorkflowHash,
 		)
 		if err != nil {
 			return fmt.Errorf("inserting finding: %w", err)
