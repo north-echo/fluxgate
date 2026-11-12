@@ -220,3 +220,38 @@ func TestCompare_EmptyDatabases(t *testing.T) {
 			result.New, result.Resolved, result.Unchanged, result.Regressed)
 	}
 }
+
+// A clone-mode scan from before path normalization stored the checkout
+// prefix; it must still match the same finding from an API-mode scan.
+func TestCompare_CloneModePathsMatchAPIMode(t *testing.T) {
+	oldPath := filepath.Join(t.TempDir(), "old.db")
+	newPath := filepath.Join(t.TempDir(), "new.db")
+	mk := func(path string, findings ...scanner.Finding) {
+		populateDB(t, path, []struct {
+			owner, repo string
+			stars       int
+			lang        string
+			result      *scanner.ScanResult
+		}{{
+			owner: "acme", repo: "app", stars: 1, lang: "Go",
+			result: &scanner.ScanResult{Path: "acme/app", Workflows: 1, Findings: findings},
+		}})
+	}
+	mk(oldPath,
+		scanner.Finding{RuleID: "FG-001", Severity: "critical", File: ".github/workflows/ci.yml", Line: 10, Message: "pwn request"})
+	mk(newPath,
+		scanner.Finding{RuleID: "FG-001", Severity: "critical", File: "clones/acme/app/.github/workflows/ci.yml", Line: 10, Message: "pwn request"},
+		scanner.Finding{RuleID: "FG-002", Severity: "high", File: "clones/acme/app/.github/workflows/ci.yml", Line: 20, Message: "script injection"})
+
+	result, err := Compare(oldPath, newPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Unchanged != 1 || result.New != 1 || result.Resolved != 0 {
+		t.Fatalf("expected unchanged=1 new=1 resolved=0, got unchanged=%d new=%d resolved=%d",
+			result.Unchanged, result.New, result.Resolved)
+	}
+	if got := result.NewFindings[0].WorkflowPath; got != ".github/workflows/ci.yml" {
+		t.Errorf("expected repo-relative path in report, got %q", got)
+	}
+}

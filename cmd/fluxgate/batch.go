@@ -236,6 +236,7 @@ func batchScanWithClone(ctx context.Context, repos []ghclient.RepoInfo, copts cl
 			}
 			cr.SetFindings(len(scanResult.Findings), scanResult.Workflows)
 			scanResult.Path = key
+			relativizeFindingPaths(dir, scanResult)
 			return copts.DB.SaveResult(owner, name, info.Stars, info.Language, scanResult)
 		})
 
