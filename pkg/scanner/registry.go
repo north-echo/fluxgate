@@ -33,6 +33,7 @@ var allRules = map[string]Rule{
 	"FG-025": CheckKnownIOCs,
 	"FG-026": CheckLifecycleInstallBeforeCredentialedOperation,
 	"FG-027": CheckLabelGateTOCTOU,
+	"FG-028": CheckSecretExfiltration,
 }
 
 // AllRules returns all enabled detection rules. The returned map is a copy;
@@ -74,4 +75,5 @@ var RuleDescriptions = map[string]string{
 	"FG-025": "Known Threat-Actor IOC",
 	"FG-026": "Lifecycle Install Before Credentialed Operation",
 	"FG-027": "TOCTOU Label Gate",
+	"FG-028": "Secret Exfiltration Behavior",
 }
