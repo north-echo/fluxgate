@@ -53,6 +53,7 @@ go install github.com/north-echo/fluxgate/cmd/fluxgate@latest
 | FG-025  | Critical | Known threat-actor IOC |
 | FG-026  | High     | Lifecycle install before credentialed operation (npm, yarn, pnpm, pip, gem, cargo) |
 | FG-027  | High     | TOCTOU label gate: label not stripped on synchronize |
+| FG-028  | Critical | Secret exfiltration behavior: runner memory scrape, environment sweep, secrets or environment sent to the network |
 
 FG-026 covers dependency code that runs during install or build in a job that
 also holds publish, cloud, or release credentials: npm/yarn/pnpm lifecycle
@@ -69,6 +70,22 @@ scope. Pair a verified build in an uncredentialed job with `cargo publish
 --no-verify` in the credentialed one. The remaining mitigations are provenance
 rather than suppression: `--locked` with a committed `Cargo.lock`, vendoring
 with `--offline`, and gating dependency changes with cargo-vet or cargo-deny.
+
+FG-028 looks for workflows that behave like a credential stealer, as opposed
+to the insecure designs the other rules cover. It fires on steps that read
+`/proc/<pid>/maps` and `/proc/<pid>/mem` (the Runner.Worker memory dump used
+by the tj-actions and Shai-Hulud payloads), point a memory dumper at the runner
+process, sweep `/proc/*/environ` and keep the output, or send `toJSON(secrets)`
+or a whole-environment dump to a network endpoint. `toJSON(secrets)` next to a
+publicly routable raw-IP URL is also critical, since that is the shape a
+stealer leaves in the YAML when its logic lives in a separate script. Findings
+are not downgraded for label gates or fork guards: a gate does not mitigate a
+workflow the attacker wrote.
+
+Stealers pushed with compromised credentials often land on a throwaway branch
+and are reverted within minutes, so scanning the default branch on a schedule
+will miss them. Run FG-028 on every push that touches `.github/workflows/`, on
+every branch.
 
 ### GitLab CI (GL-xxx)
 
@@ -125,7 +142,7 @@ with `--offline`, and gating dependency changes with cargo-vet or cargo-deny.
 | CC-003  | Medium   | Unpinned orb versions |
 | CC-009  | High     | Self-hosted runner on fork PRs |
 
-**57 rules across 6 CI/CD platforms.**
+**58 rules across 6 CI/CD platforms.**
 
 ## Why This Exists
 

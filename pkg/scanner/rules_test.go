@@ -1093,7 +1093,7 @@ func TestJobTokenClassification(t *testing.T) {
 
 func TestAllRules_IncludesNewRules(t *testing.T) {
 	rules := AllRules()
-	expectedIDs := []string{"FG-018", "FG-019", "FG-020", "FG-021", "FG-022", "FG-023", "FG-024", "FG-025", "FG-026"}
+	expectedIDs := []string{"FG-018", "FG-019", "FG-020", "FG-021", "FG-022", "FG-023", "FG-024", "FG-025", "FG-026", "FG-027", "FG-028"}
 	for _, id := range expectedIDs {
 		if _, ok := rules[id]; !ok {
 			t.Errorf("AllRules() missing %s", id)
