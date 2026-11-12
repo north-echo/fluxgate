@@ -35,6 +35,11 @@ type TriggerConfig struct {
 	PushTagsOnly           bool // push is gated to tag refs (no branches:) — repo-writer-only path
 	Release                bool // on: release — only repo writers can create releases
 	Issues                 bool
+
+	// PushAnyBranch: push fires on branches a writer can create: no
+	// branches: filter, branches-ignore only, or a glob pattern. A filter
+	// of exact names (e.g. [main]) is not any-branch.
+	PushAnyBranch bool
 }
 
 // PermissionsConfig represents workflow or job-level permissions.
@@ -299,12 +304,39 @@ func parseTriggers(node *yaml.Node) TriggerConfig {
 					}
 					if hasTags && !hasBranches {
 						tc.PushTagsOnly = true
+						tc.PushAnyBranch = false
+					}
+					if hasBranches {
+						tc.PushAnyBranch = pushBranchesOpen(valNode)
 					}
 				}
 			}
 		}
 	}
 	return tc
+}
+
+// pushBranchesOpen reports whether a push trigger's branch filter admits
+// branches a repo writer can create: branches-ignore (everything else is
+// allowed) or any glob in branches:. Only exact branch names restrict it.
+func pushBranchesOpen(valNode *yaml.Node) bool {
+	for j := 0; j < len(valNode.Content)-1; j += 2 {
+		switch valNode.Content[j].Value {
+		case "branches-ignore":
+			return true
+		case "branches":
+			list := valNode.Content[j+1]
+			if list.Kind == yaml.ScalarNode {
+				return strings.ContainsAny(list.Value, "*?[!")
+			}
+			for _, b := range list.Content {
+				if strings.ContainsAny(b.Value, "*?[!") {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func applyTrigger(tc *TriggerConfig, trigger string) {
@@ -321,6 +353,7 @@ func applyTrigger(tc *TriggerConfig, trigger string) {
 		tc.WorkflowDispatch = true
 	case "push":
 		tc.Push = true
+		tc.PushAnyBranch = true
 	case "release":
 		tc.Release = true
 	case "issues":

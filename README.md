@@ -54,6 +54,7 @@ go install github.com/north-echo/fluxgate/cmd/fluxgate@latest
 | FG-026  | High     | Lifecycle install before credentialed operation (npm, yarn, pnpm, pip, gem, cargo) |
 | FG-027  | High     | TOCTOU label gate: label not stripped on synchronize |
 | FG-028  | Critical | Secret exfiltration behavior: runner memory scrape, environment sweep, secrets or environment sent to the network |
+| FG-029  | High     | Ungated cloud OIDC: cloud login reachable from refs any writer can create |
 
 FG-026 covers dependency code that runs during install or build in a job that
 also holds publish, cloud, or release credentials: npm/yarn/pnpm lifecycle
@@ -86,6 +87,16 @@ Stealers pushed with compromised credentials often land on a throwaway branch
 and are reverted within minutes, so scanning the default branch on a schedule
 will miss them. Run FG-028 on every push that touches `.github/workflows/`, on
 every branch.
+
+FG-029 covers the same threat from the other side: what a stolen write token
+could reach. A job that logs into AWS, Azure, GCP, or Vault through GitHub OIDC
+with no `environment:` gate leaves the cloud trust policy as the only
+boundary, and a writer can push a branch with their own workflow to request a
+token. It is high when the workflow's own triggers show the trust policy must
+admit refs any writer can create (`pull_request`, or `push` without an
+exact-name branch filter), and medium otherwise. Fix it by binding the job to
+an environment with a deployment branch rule, or by pinning the trust policy's
+`sub` to a protected ref.
 
 ### GitLab CI (GL-xxx)
 
@@ -142,7 +153,7 @@ every branch.
 | CC-003  | Medium   | Unpinned orb versions |
 | CC-009  | High     | Self-hosted runner on fork PRs |
 
-**58 rules across 6 CI/CD platforms.**
+**59 rules across 6 CI/CD platforms.**
 
 ## Why This Exists
 
